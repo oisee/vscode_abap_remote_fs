@@ -122,6 +122,33 @@ describe("provider ADT transport", () => {
     expect(Reflect.get(client, "debugCallback")).toBeUndefined()
     expect(Reflect.get(client.statelessClone, "debugCallback")).toBeUndefined()
   })
+  it.each([false, true])("redacts malformed successful responses (clone=%s)", async clone => {
+    const token = "PRIVATE-ECHOED-TOKEN"
+    const logs = [
+      vi.spyOn(console, "error"),
+      vi.spyOn(console, "log"),
+      vi.spyOn(console, "warn"),
+      vi.spyOn(console, "debug")
+    ]
+    const client = createProviderClient({
+      ...connection,
+      auth: { kind: "provider", getHeaders: async () => ({ Authorization: token }) }
+    })
+    const session = clone ? client.statelessClone : client
+    await session.login()
+    request.mockResolvedValueOnce({
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      body: `<customizing><exemption><reasons><reason id="test" title="test" justificationMandatory="${token}"/></reasons></exemption></customizing>`
+    })
+    const failure = await session.atcCustomizing().catch(error => error)
+    expect(failure).toBeInstanceOf(Error)
+    for (const value of [failure.message, failure.stack, JSON.stringify(failure)])
+      expect(value).not.toContain(token)
+    for (const logger of [...logs, extensionLog, extensionLog.debug, telemetry, communicationLog])
+      expect(logger).not.toHaveBeenCalled()
+  })
   it("does not retry non-401 failures or basic authentication", async () => {
     const getHeaders = vi.fn(async () => ({ Authorization: "secret" }))
     request.mockRejectedValueOnce({ status: 403, message: "secret" })

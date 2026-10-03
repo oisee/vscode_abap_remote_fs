@@ -78,8 +78,33 @@ export function createProviderClient(connection: ProvidedConnection): ADTClient 
     }
     override get statelessClone(): ADTClient {
       if (this.isClone) return this
-      return (this.clone ??= new ProviderClient(true))
+      return (this.clone ??= protect(new ProviderClient(true)))
     }
   }
-  return new ProviderClient()
+  function protect(client: ADTClient): ADTClient {
+    const proxy = new Proxy(client, {
+      get(target, key) {
+        if (key === "statelessClone" && target.statelessClone === target) return proxy
+        const value = Reflect.get(target, key, target)
+        if (typeof value !== "function") return value
+        return (...args: unknown[]) => {
+          try {
+            const result = value.apply(target, args)
+            return result instanceof Promise
+              ? result.catch(() => {
+                  throw safeError()
+                })
+              : result
+          } catch {
+            throw safeError()
+          }
+        }
+      }
+    })
+    return proxy
+  }
+  function safeError() {
+    return new Error(`ADT request failed for provider connection ${connection.id}`)
+  }
+  return protect(new ProviderClient())
 }
