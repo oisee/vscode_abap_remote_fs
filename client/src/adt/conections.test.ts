@@ -241,16 +241,17 @@ describe("connection lifecycle", () => {
       })
     })
     const creation = getOrCreateRoot("osd")
-    const failure = expect(creation).rejects.toThrow(/removed or changed/)
+    const failure = expect(creation).rejects.toThrow(/withdrawn|Unable to connect/)
     await starting
     providedConnections.delete("osd")
     const removal = disconnectConnection("osd")
-    finish()
-    await failure
     await removal
+    await failure
+    finish()
+    await Promise.resolve()
     expect(clientIsConnected("osd")).toBe(false)
     expect(() => getRoot("osd")).toThrow()
-    expect(client.logout).toHaveBeenCalledOnce()
+    expect(client.statelessClone.login).not.toHaveBeenCalled()
   })
   it("authenticates provider headers without asking for or saving passwords", async () => {
     const askPassword = vi.fn(),
@@ -263,7 +264,10 @@ describe("connection lifecycle", () => {
       savePassword
     } as never)
     await getOrCreateRoot("osd")
-    expect(createProviderClient).toHaveBeenCalledWith(providedConnections.get("osd"))
+    expect(createProviderClient).toHaveBeenCalledWith(
+      providedConnections.get("osd"),
+      expect.any(AbortSignal)
+    )
     expect(askPassword).not.toHaveBeenCalled()
     expect(savePassword).not.toHaveBeenCalled()
     expect(client.login).toHaveBeenCalledOnce()

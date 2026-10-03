@@ -1,4 +1,5 @@
 import { providedConnections } from "../connectionProviders"
+import { untilCancelled } from "../providerTransport"
 import { createProviderClient } from "../providerClient"
 import { connected, disconnected } from "../apiEvents"
 import { RemoteManager, createClient, createAuthenticatedClient } from "../config"
@@ -14,6 +15,7 @@ export const ADTURIPATTERN = /\/sap\/bc\/adt\//
 
 const roots = new Map<string, Root>()
 const clients = new Map<string, ADTClient>()
+const cancellations = new Map<string, AbortController>()
 const creations = new Map<string, Promise<void>>()
 const revisions = new Map<string, number>()
 const removals = new Map<string, Promise<void>>()
@@ -25,7 +27,7 @@ const missing = (connId: string) => {
 
 export const abapUri = (u?: Uri) => u?.scheme === ADTSCHEME && !LocalFsProvider.useLocalStorage(u)
 
-async function create(connId: string) {
+async function create(connId: string, cancellation: AbortController) {
   const revision = revisions.get(connId)
   const provided = providedConnections.get(connId)
   const manager = RemoteManager.get()
@@ -53,12 +55,14 @@ async function create(connId: string) {
   let client: ADTClient
 
   if (provided) {
-    client = createProviderClient(provided)
+    cancellation.signal.throwIfAborted()
+    client = createProviderClient(provided, cancellation.signal)
     try {
-      await client.login()
-      await client.statelessClone.login()
+      await untilCancelled(client.login(), cancellation.signal)
+      await untilCancelled(client.statelessClone.login(), cancellation.signal)
     } catch {
-      await Promise.allSettled([client.logout(), client.statelessClone.logout()])
+      if (!cancellation.signal.aborted)
+        await boundedCleanup(Promise.allSettled([client.logout(), client.statelessClone.logout()]))
       throw new Error(`Unable to connect to provider connection ${connId}`)
     }
   } else if (authMethod !== "basic" && validAuthMethods.includes(authMethod)) {
@@ -111,7 +115,13 @@ function createIfMissing(connId: string) {
   }
   let creation = creations.get(connId)
   if (!creation) {
-    creation = create(connId).catch(err => {
+    const cancellation = new AbortController()
+    if (providedConnections.has(connId)) cancellations.set(connId, cancellation)
+    creation = (
+      providedConnections.has(connId)
+        ? untilCancelled(create(connId, cancellation), cancellation.signal)
+        : create(connId, cancellation)
+    ).catch(err => {
       // Mark as permanently failed if it's an interactive/auth error
       // so VS Code filesystem doesn't keep triggering retry loops
       const msg = String(err?.message || err)
@@ -193,23 +203,38 @@ export const getOrCreateRoot = async (connId: string) => {
 export function hasLocks() {
   for (const root of roots.values()) if (root.lockManager.lockedPaths().next().value) return true
 }
-/** Immediately invalidate caches; await login cancellation, locks and logout in the background. */
+function boundedCleanup(work: Promise<unknown>): Promise<void> {
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, 1000)
+    work
+      .catch(() => undefined)
+      .finally(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+  })
+}
+/** Immediately invalidate provider operations; bound cleanup independently of callbacks. */
 export function disconnectConnection(id: string): Promise<void> {
   const connId = id.toLowerCase()
   const previous = removals.get(connId)
   if (previous) return previous
   revisions.set(connId, (revisions.get(connId) || 0) + 1)
+  const provider = cancellations.get(connId)
+  provider?.abort()
+  cancellations.delete(connId)
   const client = clients.get(connId)
   const root = roots.get(connId)
   clients.delete(connId)
   roots.delete(connId)
   failedConnections.delete(connId)
-  const removal = (async () => {
+  const cleanup = (async () => {
     await creations.get(connId)?.catch(() => undefined)
     await Promise.allSettled(LogOutPendingDebuggers(connId))
     if (root) await root.lockManager.dropall()?.catch(() => undefined)
     if (client) await Promise.allSettled([client.logout(), client.statelessClone.logout()])
   })()
+  const removal = provider ? boundedCleanup(cleanup) : cleanup
   removals.set(connId, removal)
   if (client) disconnected.fire(connId)
   void removal.then(

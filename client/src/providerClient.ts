@@ -1,5 +1,6 @@
 import { ADTClient, createSSLConfig, session_types, isCsrfError } from "abap-adt-api"
 import { AxiosHttpClient } from "abap-adt-api/build/AxiosHttpClient.js"
+import { ProviderTransport, untilCancelled } from "./providerTransport"
 import type { ProvidedConnection } from "./connectionProviders"
 
 function isUnauthorized(error: unknown): boolean {
@@ -9,28 +10,41 @@ function isUnauthorized(error: unknown): boolean {
 }
 
 /** Fresh headers on every request, shared by stateful and stateless sessions. */
-export function createProviderClient(connection: ProvidedConnection): ADTClient {
+export function createProviderClient(
+  connection: ProvidedConnection,
+  signal = new AbortController().signal
+): ADTClient {
   const ssl = connection.url.startsWith("https:")
     ? createSSLConfig(!!connection.allowSelfSigned)
     : {}
-  const transport = new AxiosHttpClient(connection.url, ssl)
+  const transport = new ProviderTransport(connection.url, ssl)
   const http = {
     request: async (options: Parameters<AxiosHttpClient["request"]>[0]) => {
       const send = async () => {
+        signal.throwIfAborted()
         const headers =
-          connection.auth.kind === "provider" ? await connection.auth.getHeaders() : {}
+          connection.auth.kind === "provider"
+            ? await untilCancelled(connection.auth.getHeaders(), signal)
+            : {}
+        signal.throwIfAborted()
         const mergedHeaders = { ...options.headers, ...headers }
         const cookieKey = Object.keys(headers).find(key => key.toLowerCase() === "cookie")
         if (cookieKey && options.headers?.Cookie) {
           delete mergedHeaders[cookieKey]
           mergedHeaders.Cookie = `${options.headers.Cookie}; ${headers[cookieKey]}`
         }
-        return transport.request({
-          ...options,
-          ...(connection.auth.kind === "provider" ? { auth: undefined } : {}),
-          timeout: options.timeout ?? 30000,
-          headers: mergedHeaders
-        })
+        return untilCancelled(
+          transport.request(
+            {
+              ...options,
+              ...(connection.auth.kind === "provider" ? { auth: undefined } : {}),
+              timeout: options.timeout ?? 30000,
+              headers: mergedHeaders
+            },
+            signal
+          ),
+          signal
+        )
       }
       try {
         for (let attempt = 0; attempt < 2; attempt++) {

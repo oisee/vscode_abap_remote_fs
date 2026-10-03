@@ -107,7 +107,9 @@ ABAP FS connects and mounts connections present in the initial snapshot and afte
 Automatic failures are silent; another provider event retries, or call `connect(id)`
 to observe a rejected promise. Connections without this flag still require
 `connect(id)`. Reconnecting waits for cleanup.
-Disposal cancels a pending login. Consumers should stop requests before withdrawal.
+Disposal cancels pending provider logins and requests in both sessions, including waits for
+header callbacks. Late callback results cannot send requests. Provider cleanup is bounded to
+one second independently of callbacks; reconnecting waits for that cleanup.
 Nothing is persisted; re-register when the consumer activates again. The example
 uses your own `startLocalSystem()` launcher: retain its per-start token only in
 memory, withdraw the snapshot on shutdown, and publish a new snapshot on restart.

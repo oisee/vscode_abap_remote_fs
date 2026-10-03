@@ -17,8 +17,9 @@ vi.mock("./services/telemetry", () => ({ logTelemetry: telemetry }))
 vi.mock("./adt/adtCommLog", () => ({
   CallLogger: { get: () => ({ add: communicationLog }) }
 }))
-vi.mock("abap-adt-api/build/AxiosHttpClient.js", () => ({
-  AxiosHttpClient: class {
+vi.mock("./providerTransport", async importOriginal => ({
+  ...(await importOriginal<typeof import("./providerTransport")>()),
+  ProviderTransport: class {
     request = request
   }
 }))
@@ -199,6 +200,36 @@ describe("provider ADT transport", () => {
     request.mockRejectedValueOnce({ status: 401 })
     await expect(createProviderClient(connection).login()).rejects.toThrow(/ADT request failed/)
     expect(request).toHaveBeenCalledOnce()
+  })
+  it("cancels both sessions while headers never settle and prevents a late send", async () => {
+    request.mockClear()
+    let finish!: (headers: Record<string, string>) => void
+    const getHeaders = vi.fn(
+      () =>
+        new Promise<Record<string, string>>(resolve => {
+          finish = resolve
+        })
+    )
+    const cancellation = new AbortController()
+    const client = createProviderClient(
+      { ...connection, auth: { kind: "provider", getHeaders } },
+      cancellation.signal
+    )
+    const login = client.login()
+    const cloneLogin = client.statelessClone.login()
+    const rejected = Promise.all([
+      expect(login).rejects.toThrow(/ADT request failed/),
+      expect(cloneLogin).rejects.toThrow(/ADT request failed/)
+    ])
+    await vi.waitFor(() => expect(getHeaders).toHaveBeenCalledTimes(2))
+    cancellation.abort()
+    await rejected
+    finish({ Authorization: "late-token" })
+    await Promise.resolve()
+    await expect(client.login()).rejects.toThrow(/ADT request failed/)
+    await expect(client.statelessClone.login()).rejects.toThrow(/ADT request failed/)
+    expect(request).not.toHaveBeenCalled()
+    expect(getHeaders).toHaveBeenCalledTimes(2)
   })
   it("supports explicit basic credentials including an empty local password", async () => {
     request.mockClear()
