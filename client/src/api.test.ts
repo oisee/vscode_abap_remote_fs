@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+const { folderListeners } = vi.hoisted(() => ({
+  folderListeners: new Set<(event: unknown) => void>()
+}))
 
 vi.mock("vscode", () => {
   class Uri {
@@ -45,6 +48,10 @@ vi.mock("vscode", () => {
     workspace: {
       getConfiguration: vi.fn(() => ({ remote: {} })),
       workspaceFolders: [],
+      onDidChangeWorkspaceFolders: (listener: (event: unknown) => void) => {
+        folderListeners.add(listener)
+        return { dispose: () => folderListeners.delete(listener) }
+      },
       updateWorkspaceFolders: vi.fn(() => true),
       openTextDocument: vi.fn(async uri => ({ uri }))
     },
@@ -101,8 +108,25 @@ const connection: ProvidedConnection = {
   user: "developer",
   auth: { kind: "basic", password: "secret" }
 }
-beforeEach(() => {
+beforeEach(async () => {
+  await new Promise(resolve => setTimeout(resolve, 10))
   vi.clearAllMocks()
+  Object.defineProperty(workspace, "workspaceFolders", { value: [], configurable: true })
+  vi.mocked(workspace.updateWorkspaceFolders).mockImplementation(
+    (start, deleteCount, ...additions) => {
+      queueMicrotask(() => {
+        const folders = [...(workspace.workspaceFolders || [])]
+        folders.splice(
+          start,
+          deleteCount ?? 0,
+          ...additions.map((folder, index) => ({ ...folder, name: folder.name || "", index }))
+        )
+        Object.defineProperty(workspace, "workspaceFolders", { value: folders, configurable: true })
+        for (const listener of folderListeners) listener({} as never)
+      })
+      return true
+    }
+  )
   providedConnections.clear()
   vi.mocked(clientIsConnected).mockReturnValue(true)
   vi.mocked(isAbapFile).mockReturnValue(true)
@@ -224,8 +248,9 @@ describe("AbapFsApi v2", () => {
       getConnections: () => [connection, { ...connection, id: "osd-two" }]
     })
     registration.dispose()
-    await Promise.resolve()
-    expect(workspace.updateWorkspaceFolders).toHaveBeenCalledExactlyOnceWith(0, 3, folders[2])
+    await vi.waitFor(() =>
+      expect(workspace.updateWorkspaceFolders).toHaveBeenCalledExactlyOnceWith(0, 3, folders[2])
+    )
     Object.defineProperty(workspace, "workspaceFolders", { value: [], configurable: true })
   })
   it("rejects colliding registrations atomically", () => {
@@ -245,6 +270,58 @@ describe("AbapFsApi v2", () => {
     expect(api.isConnected("osd")).toBe(true)
     vi.mocked(clientIsConnected).mockReturnValue(false)
     expect(api.isConnected("osd")).toBe(false)
+  })
+  it("serializes different connections until asynchronous folder updates complete", async () => {
+    let pending = false
+    vi.mocked(workspace.updateWorkspaceFolders).mockImplementation(
+      (start, deleteCount, ...additions) => {
+        if (pending) return false
+        pending = true
+        setTimeout(() => {
+          const folders = [...(workspace.workspaceFolders || [])]
+          folders.splice(
+            start,
+            deleteCount ?? 0,
+            ...additions.map((folder, index) => ({ ...folder, name: folder.name || "", index }))
+          )
+          Object.defineProperty(workspace, "workspaceFolders", {
+            value: folders,
+            configurable: true
+          })
+          pending = false
+          for (const listener of folderListeners) listener({})
+        }, 10)
+        return true
+      }
+    )
+    await Promise.all([api.connect("osd"), api.connect("osd-two")])
+    expect(workspace.workspaceFolders?.map(f => f.uri.authority)).toEqual(["osd", "osd-two"])
+    expect(folderListeners.size).toBe(0)
+  })
+  it("awaits mounting before connect returns and unmounts immediate withdrawal", async () => {
+    const registration = api.registerConnectionProvider({ getConnections: () => [connection] })
+    await api.connect("osd")
+    expect(workspace.workspaceFolders?.some(f => f.uri.authority === "osd")).toBe(true)
+    registration.dispose()
+    await vi.waitFor(() => expect(workspace.workspaceFolders).toEqual([]))
+  })
+  it("reconciles provider withdrawal during a pending folder change", async () => {
+    const registration = api.registerConnectionProvider({ getConnections: () => [connection] })
+    let complete!: () => void
+    vi.mocked(workspace.updateWorkspaceFolders).mockImplementationOnce((_, __, ...folders) => {
+      complete = () => {
+        Object.defineProperty(workspace, "workspaceFolders", { value: folders, configurable: true })
+        for (const listener of folderListeners) listener({})
+      }
+      return true
+    })
+    const connecting = api.connect("osd")
+    const failure = expect(connecting).rejects.toThrow(/removed|changed/i)
+    await vi.waitFor(() => expect(complete).toBeDefined())
+    registration.dispose()
+    complete()
+    await failure
+    await vi.waitFor(() => expect(workspace.workspaceFolders).toEqual([]))
   })
   it("rejects failed connections and failed workspace mounts", async () => {
     vi.mocked(getOrCreateRoot).mockRejectedValueOnce(new Error("login failed"))

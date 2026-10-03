@@ -76,19 +76,47 @@ export function initializeApi(): Disposable {
   })
 }
 
+// VS Code only accepts another edit after onDidChangeWorkspaceFolders fires.
+let workspaceChanges = Promise.resolve()
+function queueWorkspaceChange(change: () => Promise<void>): Promise<void> {
+  const pending = workspaceChanges.then(change)
+  workspaceChanges = pending.catch(() => undefined)
+  return pending
+}
+function updateFolders(
+  start: number,
+  count: number,
+  ...folders: { uri: Uri; name: string }[]
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const subscription = workspace.onDidChangeWorkspaceFolders(() => {
+      subscription.dispose()
+      resolve()
+    })
+    if (!workspace.updateWorkspaceFolders(start, count, ...folders)) {
+      subscription.dispose()
+      reject(new Error("Unable to mount ABAP workspace folders"))
+    }
+  })
+}
 const unmounts = new Set<string>()
 function scheduleUnmount(id: string) {
   const scheduled = unmounts.size > 0
   unmounts.add(id)
   if (scheduled) return
   queueMicrotask(() => {
-    const folders = workspace.workspaceFolders || []
-    const remaining = folders.filter(
-      f => f.uri.scheme !== "adt" || !unmounts.has(f.uri.authority.toLowerCase())
-    )
-    unmounts.clear()
-    if (remaining.length !== folders.length)
-      workspace.updateWorkspaceFolders(0, folders.length, ...remaining)
+    void queueWorkspaceChange(async () => {
+      const folders = workspace.workspaceFolders || []
+      const remaining = folders.filter(
+        f =>
+          f.uri.scheme !== "adt" ||
+          !unmounts.has(f.uri.authority.toLowerCase()) ||
+          (providedConnections.has(f.uri.authority.toLowerCase()) &&
+            clientIsConnected(f.uri.authority))
+      )
+      unmounts.clear()
+      if (remaining.length !== folders.length) await updateFolders(0, folders.length, ...remaining)
+    }).catch(() => undefined)
   })
 }
 
@@ -97,18 +125,26 @@ async function connect(id: string): Promise<void> {
   id = id.toLowerCase()
   const pending = mounts.get(id)
   if (pending) return pending
+  const owner = providedConnections.get(id)
+  const current = () => clientIsConnected(id) && (!owner || providedConnections.get(id) === owner)
   const mount = (async () => {
     await getOrCreateRoot(id)
-    if (!clientIsConnected(id)) throw new Error(`Connection removed: ${id}`)
-    if (workspace.workspaceFolders?.some(f => f.uri.scheme === "adt" && f.uri.authority === id))
-      return
-    if (
-      !workspace.updateWorkspaceFolders(workspace.workspaceFolders?.length || 0, 0, {
+    await queueWorkspaceChange(async () => {
+      if (!current()) throw new Error(`Connection removed or changed: ${id}`)
+      if (workspace.workspaceFolders?.some(f => f.uri.scheme === "adt" && f.uri.authority === id))
+        return
+      await updateFolders(workspace.workspaceFolders?.length || 0, 0, {
         uri: Uri.parse(`adt://${id}`),
         name: `${id}(ABAP)`
       })
-    )
-      throw new Error(`Unable to mount ABAP connection ${id}`)
+      if (!current()) {
+        const folders = workspace.workspaceFolders || []
+        const remaining = folders.filter(f => f.uri.scheme !== "adt" || f.uri.authority !== id)
+        if (remaining.length !== folders.length)
+          await updateFolders(0, folders.length, ...remaining)
+        throw new Error(`Connection removed or changed: ${id}`)
+      }
+    })
   })()
   mounts.set(id, mount)
   try {
