@@ -18,13 +18,13 @@ export function rememberProviderHeaders(headers: Record<string, string>) {
   }
 }
 export function rememberProviderPassword(password: string) {
-  remember(password)
+  if (password) secrets.add(password)
 }
 
 /** Sanitize before JSON-RPC serialization and tracing, in either direction. */
 export function redactProviderProtocol<T>(value: T): T {
   for (const connection of providedConnections.values())
-    if (connection.auth.kind === "basic") remember(connection.auth.password)
+    if (connection.auth.kind === "basic") rememberProviderPassword(connection.auth.password)
   const values = [...secrets].sort((a, b) => b.length - a.length)
   const redact = (text: string) =>
     values.reduce((result, secret) => result.split(secret).join("[redacted]"), text)

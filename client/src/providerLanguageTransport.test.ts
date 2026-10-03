@@ -19,7 +19,12 @@ vi.mock("../../server/node_modules/vscode-languageserver/lib/main.js", async imp
 }))
 import { getOrCreateClient } from "./adt/conections"
 import { providedConnections, type ProvidedConnection } from "./connectionProviders"
-import { providerProtocolHandler, providerProtocolMiddleware } from "./providerRedaction"
+import {
+  providerProtocolHandler,
+  providerProtocolMiddleware,
+  redactProviderProtocol,
+  rememberProviderPassword
+} from "./providerRedaction"
 import { createProviderClient } from "./providerClient"
 import { providerTransportConfig, languageProviderRequest } from "./providerLanguageTransport"
 import { PassThrough } from "node:stream"
@@ -134,7 +139,19 @@ describe("language server provider integration", () => {
     ])
       expect(value).not.toContain("PRIVATE-TOKEN")
   })
-  it.each(["provider", "basicHeader", "basic"] as const)(
+  it("redacts short basic passwords from registered providers before client creation", () => {
+    providedConnections.set("osd", {
+      ...connection,
+      auth: { kind: "basic", password: "reg1234" }
+    })
+    expect(redactProviderProtocol({ body: "echo reg1234" })).toEqual({ body: "echo [redacted]" })
+  })
+  it("retains nonempty short basic passwords without an active provider and ignores empty passwords", () => {
+    rememberProviderPassword("old1234")
+    rememberProviderPassword("")
+    expect(redactProviderProtocol({ body: "echo old1234" })).toEqual({ body: "echo [redacted]" })
+  })
+  it.each(["provider", "basicHeader", "basic", "basicShort"] as const)(
     "keeps credential components out of serialized responses and verbose RPC traces (%s)",
     async kind => {
       const secrets = [
@@ -142,13 +159,13 @@ describe("language server provider integration", () => {
         "PRIVATE_COOKIE_VALUE",
         "PRIVATE_HEADER_VALUE",
         "PRIVATE_BASIC_TOKEN",
-        'PRIVATE_PASSWORD_"quoted'
+        kind === "basicShort" ? "pwd1234" : 'PRIVATE_PASSWORD_"quoted'
       ]
       const owner: ProvidedConnection = {
         ...connection,
         auth:
-          kind === "basic"
-            ? { kind, password: secrets[4] }
+          kind === "basic" || kind === "basicShort"
+            ? { kind: "basic", password: secrets[4] }
             : {
                 kind: "provider",
                 getHeaders: async () => ({
@@ -186,7 +203,7 @@ describe("language server provider integration", () => {
       receiver.listen()
       try {
         const exposed =
-          kind === "basic"
+          kind === "basic" || kind === "basicShort"
             ? [secrets[4]]
             : [kind === "basicHeader" ? secrets[3] : secrets[0], ...secrets.slice(1, 3)]
         request.mockResolvedValueOnce({

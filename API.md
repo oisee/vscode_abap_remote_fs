@@ -97,6 +97,8 @@ No password prompt is shown for provider authentication. Header values are never
 written to logs, errors, settings or telemetry. Provider credentials never go to
 settings or the password vault, and provider HTTP errors are redacted. Communication logging is disabled for provider HTTP traffic.
 
+Providers must never return credentials inside object source or other document content; redaction covers headers, responses, errors and traces, not document text.
+
 Provided connections appear in the connection picker and as read-only entries in
 Connection Manager. Changed or withdrawn connections are disconnected and unmounted;
 unchanged snapshots preserve sessions. Disposing registration withdraws all its
