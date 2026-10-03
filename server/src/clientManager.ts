@@ -158,7 +158,8 @@ const refreshClient = async (key: string, conf: ClientConfiguration) => {
     const client = createLanguageProviderClient(key, conf, (method, request) =>
       connection.sendRequest(method, request)
     )
-    client.stateful = session_types.stateful
+    // Stateless ADT requests renew an expired CSRF token with one login/retry.
+    client.stateful = session_types.stateless
     clients.set(key, client)
     providerSessions.set(key, conf.providerTransport.session)
     return

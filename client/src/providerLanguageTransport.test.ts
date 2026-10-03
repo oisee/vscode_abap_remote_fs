@@ -252,6 +252,53 @@ describe("language server provider integration", () => {
       }
     }
   )
+  it("renews an expired provider language session once and keeps an unchanged snapshot usable", async () => {
+    const { server } = await setup()
+    await server.login()
+    const expired = {
+      status: 403,
+      statusText: "Forbidden",
+      body: "expired",
+      headers: { "x-csrf-token": "Required" }
+    }
+    const completion = () =>
+      server.codeCompletion("/sap/bc/adt/programs/programs/ztest/source/main", "WR", 1, 2)
+    const result = ok(
+      "<asx:abap><asx:values><DATA><SCC_COMPLETION><IDENTIFIER>WRITE</IDENTIFIER></SCC_COMPLETION></DATA></asx:values></asx:abap>"
+    )
+    for (let attempt = 0; attempt < 2; attempt++) {
+      request.mockClear()
+      request
+        .mockResolvedValueOnce(expired)
+        .mockResolvedValueOnce(ok())
+        .mockResolvedValueOnce(result)
+      expect((await completion())[0].IDENTIFIER).toBe("WRITE")
+      expect(request).toHaveBeenCalledTimes(3)
+      expect(request.mock.calls[1][0].url).toBe("/sap/bc/adt/compatibility/graph")
+      expect(await clientFromKey("osd")).toBe(server)
+    }
+    request.mockClear()
+    request.mockResolvedValue(expired)
+    await expect(completion()).rejects.toThrow()
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+  it("stops CSRF renewal when the provider is withdrawn", async () => {
+    const { server, cancellation } = await setup()
+    await server.login()
+    request.mockClear()
+    request.mockImplementationOnce(async () => {
+      providedConnections.delete("osd")
+      cancellation.abort()
+      return {
+        status: 403,
+        statusText: "Forbidden",
+        body: "",
+        headers: { "x-csrf-token": "Required" }
+      }
+    })
+    await expect(server.codeCompletion("/sap/bc/adt/test", "WR", 1, 2)).rejects.toThrow(/withdrawn/)
+    expect(request).toHaveBeenCalledOnce()
+  })
   it("invalidates cached server clients on withdrawal and supports a new snapshot", async () => {
     const { server, cancellation } = await setup()
     await server.login()
