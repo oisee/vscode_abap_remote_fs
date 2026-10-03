@@ -43,7 +43,23 @@ vi.mock("../fs/LocalFsProvider", () => ({
   LocalFsProvider: { useLocalStorage: vi.fn().mockReturnValue(false) }
 }))
 vi.mock("../lib", () => ({ log: Object.assign(vi.fn(), { debug: vi.fn() }) }))
-vi.mock("../providerClient", () => ({ createProviderClient: vi.fn() }))
+const { httpRequest, realProviderClient } = vi.hoisted(() => ({
+  httpRequest: vi.fn(),
+  realProviderClient: {
+    create: undefined as typeof import("../providerClient").createProviderClient | undefined
+  }
+}))
+vi.mock("../providerTransport", async importOriginal => ({
+  ...(await importOriginal<typeof import("../providerTransport")>()),
+  ProviderTransport: class {
+    request = httpRequest
+  }
+}))
+vi.mock("../providerClient", async importOriginal => {
+  const actual = await importOriginal<typeof import("../providerClient")>()
+  realProviderClient.create = actual.createProviderClient
+  return { ...actual, createProviderClient: vi.fn() }
+})
 vi.mock("abapfs", () => ({
   AFsService: class {},
   Root: class {
@@ -272,6 +288,85 @@ describe("connection lifecycle", () => {
     expect(savePassword).not.toHaveBeenCalled()
     expect(client.login).toHaveBeenCalledOnce()
     expect(client.statelessClone.login).toHaveBeenCalledOnce()
+  })
+  it.each(["basic", "provider"] as const)(
+    "sends retired-session teardown after cancelling ordinary requests (%s)",
+    async kind => {
+      const getHeaders = vi.fn(async () => ({ Authorization: "Bearer PRIVATE_TEARDOWN_TOKEN" }))
+      const owner: ProvidedConnection = {
+        ...provided,
+        auth: kind === "basic" ? { kind, password: "PRIVATE_PASSWORD" } : { kind, getHeaders }
+      }
+      providedConnections.set("osd", owner)
+      vi.mocked(createProviderClient).mockImplementation(realProviderClient.create!)
+      httpRequest.mockReset().mockResolvedValue({
+        status: 200,
+        statusText: "OK",
+        body: "",
+        headers: {
+          "x-csrf-token": "retired-csrf",
+          "set-cookie": ["SAP_SESSION=retired-session; Path=/"]
+        }
+      })
+      await getOrCreateRoot("osd")
+      const retired = getClient("osd", false)
+      httpRequest.mockClear()
+      // Ordinary requests stay pending until the shared signal is aborted.
+      httpRequest.mockImplementationOnce(() => new Promise(() => {}))
+      const operation = retired.getObjectSource("/sap/bc/adt/programs/programs/ztest/source/main")
+      const cancelled = expect(operation).rejects.toThrow()
+      await vi.waitFor(() => expect(httpRequest).toHaveBeenCalledOnce())
+      providedConnections.delete("osd")
+      await disconnectConnection("osd")
+      await cancelled
+      const calls = httpRequest.mock.calls.slice(1)
+      expect(calls.map(([options]) => options.url)).toEqual([
+        "/sap/bc/adt/compatibility/graph",
+        "/sap/public/bc/icf/logoff",
+        "/sap/public/bc/icf/logoff"
+      ])
+      for (const [options, signal] of calls) {
+        expect(options.headers.Cookie).toContain("SAP_SESSION=retired-session")
+        expect(options.headers["x-csrf-token"]).toBe("retired-csrf")
+        expect(options.timeout).toBe(3000)
+        expect(signal).not.toBe(vi.mocked(createProviderClient).mock.calls.at(-1)![1])
+        if (kind === "basic") expect(options.auth.password).toBe("PRIVATE_PASSWORD")
+        else expect(options.headers.Authorization).toBe("Bearer PRIVATE_TEARDOWN_TOKEN")
+      }
+      if (kind === "provider") expect(getHeaders).toHaveBeenCalledTimes(3)
+      httpRequest.mockClear()
+      await expect(retired.getObjectSource("/sap/bc/adt/test")).rejects.toThrow()
+      expect(httpRequest).not.toHaveBeenCalled()
+    }
+  )
+  it("bounds hung remote teardown and aborts its separate transport after three seconds", async () => {
+    providedConnections.set("osd", provided)
+    vi.mocked(createProviderClient).mockImplementation(realProviderClient.create!)
+    httpRequest.mockReset().mockResolvedValue({
+      status: 200,
+      statusText: "OK",
+      body: "",
+      headers: { "x-csrf-token": "csrf" }
+    })
+    await getOrCreateRoot("osd")
+    httpRequest.mockClear().mockImplementation(() => new Promise(() => {}))
+    vi.useFakeTimers()
+    try {
+      const settled = vi.fn()
+      const removal = disconnectConnection("osd").then(settled)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(httpRequest).toHaveBeenCalledTimes(3)
+      expect(clientIsConnected("osd")).toBe(false)
+      const signals = httpRequest.mock.calls.map(([, signal]) => signal as AbortSignal)
+      expect(signals.every(signal => !signal.aborted)).toBe(true)
+      await vi.advanceTimersByTimeAsync(2999)
+      expect(settled).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(signals.every(signal => signal.aborted)).toBe(true)
+      await removal
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it("invalidates the transport after a failed provider login", async () => {
     providedConnections.set("osd", provided)

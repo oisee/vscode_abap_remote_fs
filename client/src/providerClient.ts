@@ -3,6 +3,7 @@ import {
   rememberProviderPassword,
   redactProviderProtocol
 } from "./providerRedaction"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { ADTClient, createSSLConfig, session_types, isCsrfError } from "abap-adt-api"
 import { ProviderTransport, untilCancelled } from "./providerTransport"
 import type { HttpClientOptions, HttpClientResponse } from "abap-adt-api/build/AdtHTTP.js"
@@ -12,6 +13,12 @@ const requests = new WeakMap<
   ADTClient,
   (options: HttpClientOptions) => Promise<HttpClientResponse>
 >()
+const cleanups = new WeakMap<ADTClient, () => Promise<void>>()
+/** Teardown uses the retired cookies/authentication without reopening ordinary operations. */
+export function cleanupProviderClient(client: ADTClient): Promise<void> | undefined {
+  return cleanups.get(client)?.()
+}
+
 export function providerHttpRequest(client: ADTClient, options: HttpClientOptions) {
   const request = requests.get(client)
   if (!request) throw new Error("Provider transport is unavailable")
@@ -33,16 +40,23 @@ export function createProviderClient(
     ? createSSLConfig(!!connection.allowSelfSigned)
     : {}
   const transport = new ProviderTransport(connection.url, ssl)
+  const teardown = new AsyncLocalStorage<AbortSignal>()
+  let retiredHeaders: Record<string, string> = {}
   if (connection.auth.kind === "basic") rememberProviderPassword(connection.auth.password)
   const http = {
     request: async (options: HttpClientOptions, redactResponse = false) => {
+      const cleanupSignal = teardown.getStore()
+      const requestSignal = cleanupSignal ?? signal
       const send = async () => {
-        signal.throwIfAborted()
+        requestSignal.throwIfAborted()
         const headers =
           connection.auth.kind === "provider"
-            ? await untilCancelled(connection.auth.getHeaders(), signal)
+            ? cleanupSignal
+              ? retiredHeaders
+              : await untilCancelled(connection.auth.getHeaders(), requestSignal)
             : {}
-        signal.throwIfAborted()
+        requestSignal.throwIfAborted()
+        if (!cleanupSignal) retiredHeaders = headers
         rememberProviderHeaders(headers)
         const mergedHeaders = { ...options.headers, ...headers }
         const cookieKey = Object.keys(headers).find(key => key.toLowerCase() === "cookie")
@@ -61,12 +75,12 @@ export function createProviderClient(
                       username: connection.user,
                       password: connection.auth.password
                     }),
-              timeout: options.timeout ?? 30000,
+              timeout: cleanupSignal ? 3000 : (options.timeout ?? 30000),
               headers: mergedHeaders
             },
-            signal
+            requestSignal
           ),
-          signal
+          requestSignal
         )
         if (!redactResponse) return response
         // Sanitize the entire serialized result, including header keys and extra adapter fields.
@@ -79,11 +93,21 @@ export function createProviderClient(
           try {
             response = await send()
           } catch (error) {
-            if (attempt === 0 && connection.auth.kind === "provider" && isUnauthorized(error))
+            if (
+              attempt === 0 &&
+              !cleanupSignal &&
+              connection.auth.kind === "provider" &&
+              isUnauthorized(error)
+            )
               continue
             throw error
           }
-          if (attempt === 0 && response.status === 401 && connection.auth.kind === "provider")
+          if (
+            attempt === 0 &&
+            !cleanupSignal &&
+            response.status === 401 &&
+            connection.auth.kind === "provider"
+          )
             continue
           // Do not let ADT's response parser expose a body that echoes an authentication header.
           if (response.status >= 400) throw safeError(response)
@@ -171,5 +195,23 @@ export function createProviderClient(
           : undefined
     })
   }
-  return protect(new ProviderClient())
+  const client = protect(new ProviderClient())
+  cleanups.set(client, () => {
+    const cancellation = new AbortController()
+    const timer = setTimeout(() => cancellation.abort(), 3000)
+    return teardown.run(cancellation.signal, async () => {
+      try {
+        // Start every remote cleanup even if one request never settles.
+        await Promise.allSettled([
+          client.dropSession(),
+          client.logout(),
+          client.statelessClone.logout()
+        ])
+      } finally {
+        clearTimeout(timer)
+        cancellation.abort()
+      }
+    })
+  })
+  return client
 }

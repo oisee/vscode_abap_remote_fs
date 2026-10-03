@@ -1,6 +1,6 @@
 import { providedConnections } from "../connectionProviders"
 import { untilCancelled } from "../providerTransport"
-import { createProviderClient } from "../providerClient"
+import { createProviderClient, cleanupProviderClient } from "../providerClient"
 import { connected, disconnected } from "../apiEvents"
 import { RemoteManager, createClient, createAuthenticatedClient } from "../config"
 import { AFsService, Root } from "abapfs"
@@ -61,7 +61,9 @@ async function create(connId: string, cancellation: AbortController) {
       await untilCancelled(client.login(), cancellation.signal)
       await untilCancelled(client.statelessClone.login(), cancellation.signal)
     } catch {
-      if (!cancellation.signal.aborted)
+      const cleanup = cleanupProviderClient(client)
+      if (cleanup) await cleanup
+      else if (!cancellation.signal.aborted)
         await boundedCleanup(Promise.allSettled([client.logout(), client.statelessClone.logout()]))
       throw new Error(`Unable to connect to provider connection ${connId}`)
     }
@@ -91,7 +93,8 @@ async function create(connId: string, cancellation: AbortController) {
     revisions.get(connId) !== revision ||
     (provided && providedConnections.get(connId) !== provided)
   ) {
-    await Promise.allSettled([client.logout(), client.statelessClone.logout()])
+    await (cleanupProviderClient(client) ??
+      Promise.allSettled([client.logout(), client.statelessClone.logout()]))
     throw new Error(`Connection removed or changed during login: ${connId}`)
   }
   // @ts-ignore
@@ -206,7 +209,7 @@ export function hasLocks() {
 }
 function boundedCleanup(work: Promise<unknown>): Promise<void> {
   return new Promise(resolve => {
-    const timer = setTimeout(resolve, 1000)
+    const timer = setTimeout(resolve, 3000)
     work
       .catch(() => undefined)
       .finally(() => {
@@ -229,11 +232,13 @@ export function disconnectConnection(id: string): Promise<void> {
   clients.delete(connId)
   roots.delete(connId)
   failedConnections.delete(connId)
+  const remoteCleanup = provider && client ? cleanupProviderClient(client) : undefined
   const cleanup = (async () => {
     await creations.get(connId)?.catch(() => undefined)
     await Promise.allSettled(LogOutPendingDebuggers(connId))
-    if (root) await root.lockManager.dropall()?.catch(() => undefined)
-    if (client) await Promise.allSettled([client.logout(), client.statelessClone.logout()])
+    if (root) await root.lockManager.dropall(!!remoteCleanup)?.catch(() => undefined)
+    if (remoteCleanup) await remoteCleanup
+    else if (client) await Promise.allSettled([client.logout(), client.statelessClone.logout()])
   })()
   const removal = provider ? boundedCleanup(cleanup) : cleanup
   removals.set(connId, removal)
