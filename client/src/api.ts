@@ -1,6 +1,10 @@
 import { transportValidators } from "./adt/AdtTransports"
 import { type Disposable, type CancellationToken, type Event, Uri, workspace, window } from "vscode"
-import { type ConnectionProvider, registerProvider } from "./connectionProviders"
+import {
+  type ConnectionProvider,
+  registerProvider,
+  providedConnections
+} from "./connectionProviders"
 import {
   connected,
   disconnected,
@@ -133,6 +137,14 @@ export const api: AbapFsApi = {
         RemoteManager.get().forget(id)
         void disconnectConnection(id).catch(() => undefined)
         scheduleUnmount(id)
+      },
+      connection => {
+        void (async () => {
+          // Wait for a previous mount to settle before reconnecting a changed snapshot.
+          await mounts.get(connection.id)?.catch(() => undefined)
+          if (providedConnections.get(connection.id) !== connection) return
+          await connect(connection.id)
+        })().catch(() => undefined) // Automatic connections never prompt or expose provider errors.
       }
     ),
   connect,

@@ -48,7 +48,7 @@ vi.mock("vscode", () => {
       updateWorkspaceFolders: vi.fn(() => true),
       openTextDocument: vi.fn(async uri => ({ uri }))
     },
-    window: { showTextDocument: vi.fn() }
+    window: { showTextDocument: vi.fn(), showInputBox: vi.fn(), showErrorMessage: vi.fn() }
   }
 })
 vi.mock("./adt/AdtTransports", () => ({ transportValidators: [] }))
@@ -148,6 +148,70 @@ describe("AbapFsApi v2", () => {
     registration.dispose()
     expect(unsubscribe).toHaveBeenCalledOnce()
     expect(providedConnections.size).toBe(0)
+  })
+  it("automatically mounts active snapshots, reconnects changes and withdraws without prompts or settings writes", async () => {
+    let refresh!: () => void
+    let snapshot: ProvidedConnection[] = []
+    const update = vi.fn()
+    vi.mocked(workspace.getConfiguration).mockReturnValue({ remote: {}, update } as never)
+    const registration = api.registerConnectionProvider({
+      getConnections: () => snapshot,
+      onDidChange: listener => {
+        refresh = listener
+        return { dispose() {} }
+      }
+    })
+    snapshot = [{ ...connection, autoConnect: true }]
+    refresh()
+    refresh()
+    await vi.waitFor(() => expect(workspace.updateWorkspaceFolders).toHaveBeenCalledOnce())
+    expect(getOrCreateRoot).toHaveBeenCalledOnce()
+    snapshot = [{ ...snapshot[0], url: "http://127.0.0.1:5001" }]
+    refresh()
+    await vi.waitFor(() => expect(getOrCreateRoot).toHaveBeenCalledTimes(2))
+    expect(disconnectConnection).toHaveBeenCalledOnce()
+    snapshot = []
+    refresh()
+    await Promise.resolve()
+    expect(providedConnections.size).toBe(0)
+    expect(disconnectConnection).toHaveBeenCalledTimes(2)
+    expect(window.showInputBox).not.toHaveBeenCalled()
+    expect(window.showErrorMessage).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+    registration.dispose()
+  })
+  it("auto-connects initial snapshots and safely swallows failed automatic logins", async () => {
+    vi.mocked(getOrCreateRoot).mockRejectedValueOnce(new Error("provider failure"))
+    const registration = api.registerConnectionProvider({
+      getConnections: () => [{ ...connection, autoConnect: true }]
+    })
+    await vi.waitFor(() => expect(getOrCreateRoot).toHaveBeenCalledOnce())
+    expect(workspace.updateWorkspaceFolders).not.toHaveBeenCalled()
+    expect(window.showErrorMessage).not.toHaveBeenCalled()
+    registration.dispose()
+  })
+  it("does not mount a connection withdrawn during automatic login", async () => {
+    let finish!: (value: never) => void
+    vi.mocked(getOrCreateRoot).mockReturnValueOnce(
+      new Promise(resolve => {
+        finish = resolve
+      })
+    )
+    const registration = api.registerConnectionProvider({
+      getConnections: () => [{ ...connection, autoConnect: true }]
+    })
+    await vi.waitFor(() => expect(getOrCreateRoot).toHaveBeenCalledOnce())
+    registration.dispose()
+    vi.mocked(clientIsConnected).mockReturnValue(false)
+    finish({} as never)
+    await vi.waitFor(() => expect(disconnectConnection).toHaveBeenCalledOnce())
+    expect(workspace.updateWorkspaceFolders).not.toHaveBeenCalled()
+  })
+  it("leaves connections without autoConnect idle on provider events", async () => {
+    const registration = api.registerConnectionProvider({ getConnections: () => [connection] })
+    await Promise.resolve()
+    expect(getOrCreateRoot).not.toHaveBeenCalled()
+    registration.dispose()
   })
   it("unmounts multiple withdrawn provider roots in one workspace edit", async () => {
     const folders = [

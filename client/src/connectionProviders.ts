@@ -10,6 +10,8 @@ export interface ProvidedConnection {
   auth:
     | { kind: "basic"; password: string }
     | { kind: "provider"; getHeaders: () => Promise<Record<string, string>> }
+  /** Connect and mount automatically while this connection is in the snapshot. */
+  autoConnect?: boolean
   allowSelfSigned?: boolean
 }
 
@@ -33,7 +35,8 @@ export function onProvidersChanged(listener: () => void): Disposable {
 export function registerProvider(
   provider: ConnectionProvider,
   configuredIds: () => string[],
-  remove: (id: string) => void
+  remove: (id: string) => void,
+  autoConnect: (connection: ProvidedConnection) => void = () => {}
 ): Disposable {
   let disposed = false
   let owned = new Map<string, ProvidedConnection>()
@@ -74,6 +77,7 @@ export function registerProvider(
         previous.language === connection.language &&
         previous.user === connection.user &&
         previous.allowSelfSigned === connection.allowSelfSigned &&
+        previous.autoConnect === connection.autoConnect &&
         previous.auth.kind === connection.auth.kind &&
         (previous.auth.kind === "basic" && connection.auth.kind === "basic"
           ? previous.auth.password === connection.auth.password
@@ -91,6 +95,9 @@ export function registerProvider(
     owned = incoming
     for (const [id, connection] of owned) providedConnections.set(id, connection)
     for (const listener of listeners) listener()
+    for (const connection of owned.values()) {
+      if (connection.autoConnect) autoConnect(connection)
+    }
   }
   refresh()
   const subscription = provider.onDidChange?.(refresh)
