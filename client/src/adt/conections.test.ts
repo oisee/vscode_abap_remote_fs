@@ -252,6 +252,23 @@ describe("connection lifecycle", () => {
     expect(() => getRoot("osd")).toThrow()
     expect(client.logout).toHaveBeenCalledOnce()
   })
+  it("authenticates provider headers without asking for or saving passwords", async () => {
+    const askPassword = vi.fn(),
+      savePassword = vi.fn()
+    const getHeaders = async () => ({ "X-Local-Token": "PRIVATE-PER-START-TOKEN" })
+    providedConnections.set("osd", { ...provided, auth: { kind: "provider", getHeaders } })
+    vi.mocked(RemoteManager.get).mockReturnValue({
+      byIdAsync: vi.fn(async () => ({ ...config, password: "" })),
+      askPassword,
+      savePassword
+    } as never)
+    await getOrCreateRoot("osd")
+    expect(createProviderClient).toHaveBeenCalledWith(providedConnections.get("osd"))
+    expect(askPassword).not.toHaveBeenCalled()
+    expect(savePassword).not.toHaveBeenCalled()
+    expect(client.login).toHaveBeenCalledOnce()
+    expect(client.statelessClone.login).toHaveBeenCalledOnce()
+  })
   it("uses transient authentication and cleans up failed logins", async () => {
     providedConnections.set("osd", provided)
     client.statelessClone.login.mockRejectedValueOnce(new Error("password=secret"))

@@ -582,6 +582,35 @@ import { providedConnections } from "./connectionProviders"
 
 describe("provider connection configuration", () => {
   afterEach(() => providedConnections.clear())
+  it("never resolves provider headers into configuration, settings, vault or picker data", async () => {
+    vi.clearAllMocks()
+    const token = "PRIVATE-PER-START-TOKEN"
+    const getHeaders = vi.fn(async () => ({ "X-Local-Token": token }))
+    const update = vi.fn()
+    vi.mocked(workspace.getConfiguration).mockReturnValue({ remote: {}, update } as never)
+    providedConnections.set("osd", {
+      id: "osd",
+      name: "Local OSD",
+      url: "http://127.0.0.1:5000",
+      client: "001",
+      language: "EN",
+      user: "developer",
+      autoConnect: true,
+      auth: { kind: "provider", getHeaders }
+    })
+    const manager = RemoteManager.get()
+    const views = [
+      manager.remoteList(),
+      manager.byId("osd"),
+      await manager.byIdAsync("osd"),
+      await manager.selectConnection("osd")
+    ]
+    expect(JSON.stringify(views)).not.toContain(token)
+    expect(getHeaders).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+    expect(mockVault.getPassword).not.toHaveBeenCalled()
+    expect(mockVault.setPassword).not.toHaveBeenCalled()
+  })
   it("lists and resolves transient systems without vault access or settings writes", async () => {
     vi.clearAllMocks()
     const update = vi.fn()
