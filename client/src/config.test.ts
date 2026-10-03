@@ -577,3 +577,35 @@ describe("RemoteManager", () => {
     expect(userCancel).toBe(false)
   })
 })
+
+import { providedConnections } from "./connectionProviders"
+
+describe("provider connection configuration", () => {
+  afterEach(() => providedConnections.clear())
+  it("lists and resolves transient systems without vault access or settings writes", async () => {
+    vi.clearAllMocks()
+    const update = vi.fn()
+    vi.mocked(workspace.getConfiguration).mockReturnValue({ remote: {}, update } as never)
+    providedConnections.set("osd", {
+      id: "osd",
+      name: "Local OSD",
+      url: "http://127.0.0.1:5000",
+      client: "001",
+      language: "EN",
+      user: "developer",
+      auth: { kind: "basic", password: "" }
+    })
+    const manager = RemoteManager.get()
+    expect(manager.remoteList()).toEqual([
+      expect.objectContaining({ name: "osd", username: "developer" })
+    ])
+    expect(manager.byId("OSD")?.name).toBe("osd")
+    expect(await manager.byIdAsync("OSD")).toEqual(
+      expect.objectContaining({ name: "osd", password: "", allowSelfSigned: false })
+    )
+    expect((await manager.selectConnection("osd")).remote?.name).toBe("osd")
+    expect(mockVault.getPassword).not.toHaveBeenCalled()
+    expect(mockVault.setPassword).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+  })
+})

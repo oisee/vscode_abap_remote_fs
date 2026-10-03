@@ -1,3 +1,4 @@
+import { savedObject, objectEvent } from "../apiEvents"
 import { getOrCreateRoot } from "../adt/conections"
 import {
   FileSystemError,
@@ -321,6 +322,7 @@ export class FsProvider implements FileSystemProvider {
         const trsel = await selectTransportIfNeeded(uri)
         if (trsel.cancelled) return
         await this.writewithRelogin(root, uri, node, content.toString(), trsel.transport)
+        savedObject.fire(objectEvent(uri, node.object))
         this.pEventEmitter.fire([{ type: FileChangeType.Changed, uri }])
       } else throw FileSystemError.FileNotFound(uri)
     } catch (e) {

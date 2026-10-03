@@ -18,7 +18,7 @@ import { ClassHierarchyLensProvider } from "./adt/classhierarchy"
 import { abapGitProvider } from "./views/abapgit"
 import { loadTokens, clearTokens } from "./oauth"
 import { registerAbapGit } from "./scm/abapGit"
-import { type AbapFsApi, api } from "./api"
+import { type AbapFsApi, api, initializeApi } from "./api"
 import { ADTSCHEME, disconnect, hasLocks } from "./adt/conections"
 import { MessagesProvider } from "./editors/messages"
 import { IncludeProvider } from "./adt/includes"
@@ -133,6 +133,7 @@ export async function activate(ctx: ExtensionContext): Promise<AbapFsApi> {
   clearTokens()
   checkPasswordsInSettings()
   const sub = context.subscriptions
+  sub.push(initializeApi())
 
   // 🧠 ABAP Intelligence Integration - Start
   try {

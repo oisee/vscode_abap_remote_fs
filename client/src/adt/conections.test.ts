@@ -1,4 +1,14 @@
 vi.mock("vscode", () => ({
+  EventEmitter: class<T> {
+    listeners = new Set<(value: T) => void>()
+    event = (listener: (value: T) => void) => {
+      this.listeners.add(listener)
+      return { dispose: () => this.listeners.delete(listener) }
+    }
+    fire(value: T) {
+      for (const listener of this.listeners) listener(value)
+    }
+  },
   FileSystemError: {
     FileNotFound: (msg: string) => new Error(`FileNotFound: ${msg}`)
   },
@@ -21,7 +31,7 @@ vi.mock("../config", () => ({
   createClient: vi.fn()
 }))
 
-vi.mock("./debugger", () => ({ LogOutPendingDebuggers: vi.fn().mockResolvedValue([]) }))
+vi.mock("./debugger", () => ({ LogOutPendingDebuggers: vi.fn().mockReturnValue([]) }))
 vi.mock("../services/sapSystemValidator", () => ({
   SapSystemValidator: {
     getInstance: vi
@@ -32,8 +42,14 @@ vi.mock("../services/sapSystemValidator", () => ({
 vi.mock("../fs/LocalFsProvider", () => ({
   LocalFsProvider: { useLocalStorage: vi.fn().mockReturnValue(false) }
 }))
-vi.mock("../lib", () => ({ log: vi.fn() }))
-vi.mock("abapfs", () => ({}))
+vi.mock("../lib", () => ({ log: Object.assign(vi.fn(), { debug: vi.fn() }) }))
+vi.mock("../providerClient", () => ({ createProviderClient: vi.fn() }))
+vi.mock("abapfs", () => ({
+  AFsService: class {},
+  Root: class {
+    lockManager = { dropall: vi.fn(async () => undefined) }
+  }
+}))
 
 import {
   ADTSCHEME,
@@ -132,5 +148,118 @@ describe("rootIsConnected", () => {
       configurable: true
     })
     expect(rootIsConnected("MYCONN")).toBe(true)
+  })
+})
+
+import { getOrCreateRoot, clientIsConnected, disconnectConnection, disconnect } from "./conections"
+import { RemoteManager, createClient } from "../config"
+import { createProviderClient } from "../providerClient"
+import { providedConnections, type ProvidedConnection } from "../connectionProviders"
+import { connected, disconnected } from "../apiEvents"
+
+describe("connection lifecycle", () => {
+  const config = {
+    name: "osd",
+    url: "http://127.0.0.1:5000",
+    username: "developer",
+    password: "secret",
+    client: "001",
+    language: "EN",
+    allowSelfSigned: false,
+    diff_formatter: "ADT formatter" as const
+  }
+  const provided: ProvidedConnection = {
+    id: "osd",
+    name: "OSD",
+    url: config.url,
+    client: config.client,
+    language: config.language,
+    user: config.username,
+    auth: { kind: "basic", password: "" }
+  }
+  let client: {
+    login: ReturnType<typeof vi.fn>
+    logout: ReturnType<typeof vi.fn>
+    statelessClone: {
+      login: ReturnType<typeof vi.fn>
+      logout: ReturnType<typeof vi.fn>
+      loggedin: boolean
+    }
+  }
+  beforeEach(async () => {
+    await disconnect()
+    providedConnections.clear()
+    client = {
+      login: vi.fn(async () => undefined),
+      logout: vi.fn(async () => undefined),
+      statelessClone: {
+        login: vi.fn(async () => undefined),
+        logout: vi.fn(async () => undefined),
+        loggedin: true
+      }
+    }
+    vi.mocked(createClient).mockReturnValue(client as never)
+    vi.mocked(createProviderClient).mockReturnValue(client as never)
+    vi.mocked(RemoteManager.get).mockReturnValue({ byIdAsync: vi.fn(async () => config) } as never)
+  })
+  afterEach(async () => {
+    await disconnect()
+    providedConnections.clear()
+  })
+  it("deduplicates login and fires lifecycle events once", async () => {
+    const onConnect = vi.fn(),
+      onDisconnect = vi.fn()
+    const a = connected.event(onConnect),
+      b = disconnected.event(onDisconnect)
+    const [root, same] = await Promise.all([getOrCreateRoot("OSD"), getOrCreateRoot("osd")])
+    expect(root).toBe(same)
+    expect(client.login).toHaveBeenCalledOnce()
+    expect(onConnect).toHaveBeenCalledExactlyOnceWith("osd")
+    expect(clientIsConnected("OSD")).toBe(true)
+    await disconnectConnection("OSD")
+    expect(clientIsConnected("osd")).toBe(false)
+    expect(() => getRoot("osd")).toThrow()
+    expect(client.logout).toHaveBeenCalledOnce()
+    expect(client.statelessClone.logout).toHaveBeenCalledOnce()
+    expect(onDisconnect).toHaveBeenCalledExactlyOnceWith("osd")
+    await getOrCreateRoot("osd")
+    expect(client.login).toHaveBeenCalledTimes(2)
+    a.dispose()
+    b.dispose()
+  })
+  it("cancels an in-flight provider login and never publishes its root", async () => {
+    providedConnections.set("osd", provided)
+    let finish!: () => void
+    let started!: () => void
+    const starting = new Promise<void>(resolve => {
+      started = resolve
+    })
+    client.login.mockImplementation(() => {
+      started()
+      return new Promise<void>(resolve => {
+        finish = resolve
+      })
+    })
+    const creation = getOrCreateRoot("osd")
+    const failure = expect(creation).rejects.toThrow(/removed or changed/)
+    await starting
+    providedConnections.delete("osd")
+    const removal = disconnectConnection("osd")
+    finish()
+    await failure
+    await removal
+    expect(clientIsConnected("osd")).toBe(false)
+    expect(() => getRoot("osd")).toThrow()
+    expect(client.logout).toHaveBeenCalledOnce()
+  })
+  it("uses transient authentication and cleans up failed logins", async () => {
+    providedConnections.set("osd", provided)
+    client.statelessClone.login.mockRejectedValueOnce(new Error("password=secret"))
+    await expect(getOrCreateRoot("osd")).rejects.toThrow(
+      "Unable to connect to provider connection osd"
+    )
+    expect(clientIsConnected("osd")).toBe(false)
+    expect(client.logout).toHaveBeenCalledOnce()
+    expect(client.statelessClone.logout).toHaveBeenCalledOnce()
   })
 })

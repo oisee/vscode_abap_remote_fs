@@ -5,10 +5,15 @@ import {
   type ExtensionContext
 } from "vscode"
 import { AbapConfigurationProvider, DEBUGTYPE } from "./abapConfigurationProvider"
+import { AbapDebugSession } from "./abapDebugSession"
 import { AbapDebugAdapterFactory } from "./AbapDebugAdapterFactory"
 import { registerReplayDebugger } from "./replay/registration"
 
-export const LogOutPendingDebuggers = () => AbapDebugAdapterFactory.instance.closeSessions()
+export const LogOutPendingDebuggers = (connId?: string) => {
+  if (!connId) return AbapDebugAdapterFactory.instance.closeSessions()
+  const session = AbapDebugSession.byConnection(connId)
+  return session ? [session.logOut()] : []
+}
 
 export const registerAbapDebugger = (context: ExtensionContext) => {
   const provider = new AbapConfigurationProvider()

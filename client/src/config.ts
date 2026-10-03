@@ -31,6 +31,8 @@ import {
 } from "./auth"
 import { buildOAuthOnPremAuth, clearOAuthOnPremTokens } from "./auth/oauthOnPrem"
 
+import { providedConnections, type ProvidedConnection } from "./connectionProviders"
+
 const CONFIGROOT = "abapfs"
 const REMOTE = "remote"
 export type GuiType = "SAPGUI" | "WEBGUI_CONTROLLED" | "WEBGUI_UNSAFE" | "WEBGUI_UNSAFE_EMBEDDED"
@@ -139,7 +141,7 @@ async function selectRemoteInt(remotes: RemoteConfig[]) {
 
   const selection = await window.showQuickPick(
     remotes.map(remote => ({
-      label: remote.name,
+      label: providedConnections.get(formatKey(remote.name))?.name || remote.name,
       description: remote.name,
       remote
     })),
@@ -310,6 +312,20 @@ export async function createAuthenticatedClient(conf: RemoteConfig): Promise<ADT
   }
 }
 
+function providedConfig(connection: ProvidedConnection, includePassword = false): RemoteConfig {
+  return {
+    ...defaultConfig,
+    name: connection.id,
+    url: connection.url,
+    username: connection.user,
+    client: connection.client,
+    language: connection.language,
+    allowSelfSigned: !!connection.allowSelfSigned,
+    diff_formatter: "ADT formatter",
+    password: includePassword && connection.auth.kind === "basic" ? connection.auth.password : ""
+  }
+}
+
 export class RemoteManager {
   private static instance: RemoteManager
   private connections = new Map<string, RemoteConfig>()
@@ -340,13 +356,21 @@ export class RemoteManager {
   }
 
   public static get = () => RemoteManager.instance || (RemoteManager.instance = new RemoteManager())
+  public forget(connectionId: string) {
+    this.connections.delete(formatKey(connectionId))
+  }
+
   public byId(connectionId: string): RemoteConfig | undefined {
     connectionId = formatKey(connectionId)
+    const provided = providedConnections.get(connectionId)
+    if (provided) return providedConfig(provided)
     return this.connections.get(connectionId)
   }
 
   public async byIdAsync(connectionId: string): Promise<RemoteConfig | undefined> {
     connectionId = formatKey(connectionId)
+    const provided = providedConnections.get(connectionId)
+    if (provided) return providedConfig(provided, true)
     let conn = this.connections.get(connectionId)
     if (!conn) {
       conn = this.loadRemote(connectionId)
@@ -362,11 +386,19 @@ export class RemoteManager {
     return conn
   }
 
-  private remoteList(): RemoteConfig[] {
+  public remoteList(): RemoteConfig[] {
     const userConfig = workspace.getConfiguration(CONFIGROOT)
     const remote = userConfig[REMOTE]
-    if (!remote) throw new Error("No destination configured")
-    return Object.keys(remote).map(name => config(name, remote[name] as StoredRemoteConfig))
+    if (!remote && !providedConnections.size) throw new Error("No destination configured")
+    const configured = Object.keys(remote || {}).map(name =>
+      config(name, remote[name] as StoredRemoteConfig)
+    )
+    return [
+      ...configured,
+      ...[...providedConnections.values()]
+        .filter(c => !configured.some(r => formatKey(r.name) === c.id))
+        .map(c => providedConfig(c))
+    ]
   }
 
   private loadRemote(connectionId: string) {

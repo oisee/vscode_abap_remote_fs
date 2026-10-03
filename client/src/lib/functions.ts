@@ -137,6 +137,7 @@ export const createMutex = () => {
   }
 }
 export interface Cache<TK, TP> extends Iterable<TP> {
+  delete: (x: TK) => boolean
   get: (x: TK) => TP
   size: number
 }
@@ -154,6 +155,7 @@ export function cache<TGETKEY, TRESULT, TMAPKEY>(
 ): Cache<TGETKEY, TRESULT> {
   const values = new Map<TMAPKEY, TRESULT>()
   return {
+    delete: (key: TGETKEY) => values.delete(keyTranslator(key)),
     get: (key: TGETKEY) => {
       const mapKey = keyTranslator(key)
       let cur = values.get(mapKey)

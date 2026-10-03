@@ -268,7 +268,7 @@ export class AdtCommands {
         uri: Uri.parse("adt://" + remote.name),
         name: remote.name + "(ABAP)"
       })
-      extensionContext.subscriptions.push(UnitTestRunner.get(connectionID).controller)
+      extensionContext.subscriptions.push(UnitTestRunner.get(remote.name).controller)
       log(`Connected to server ${remote.name}`)
     } catch (e) {
       const body = typeof e === "object" && (e as any)?.response?.body

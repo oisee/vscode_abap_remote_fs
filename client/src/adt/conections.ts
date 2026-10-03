@@ -1,3 +1,6 @@
+import { providedConnections } from "../connectionProviders"
+import { createProviderClient } from "../providerClient"
+import { connected, disconnected } from "../apiEvents"
 import { RemoteManager, createClient, createAuthenticatedClient } from "../config"
 import { AFsService, Root } from "abapfs"
 import { Uri, FileSystemError, workspace } from "vscode"
@@ -12,6 +15,9 @@ export const ADTURIPATTERN = /\/sap\/bc\/adt\//
 const roots = new Map<string, Root>()
 const clients = new Map<string, ADTClient>()
 const creations = new Map<string, Promise<void>>()
+const revisions = new Map<string, number>()
+const removals = new Map<string, Promise<void>>()
+export const clientIsConnected = (id: string) => clients.has(id.toLowerCase())
 
 const missing = (connId: string) => {
   return FileSystemError.FileNotFound(`No ABAP server defined for ${connId}`)
@@ -20,6 +26,8 @@ const missing = (connId: string) => {
 export const abapUri = (u?: Uri) => u?.scheme === ADTSCHEME && !LocalFsProvider.useLocalStorage(u)
 
 async function create(connId: string) {
+  const revision = revisions.get(connId)
+  const provided = providedConnections.get(connId)
   const manager = RemoteManager.get()
   const connection = await manager.byIdAsync(connId)
   if (!connection) throw Error(`Connection not found ${connId}`)
@@ -44,7 +52,16 @@ async function create(connId: string) {
   )
   let client: ADTClient
 
-  if (authMethod !== "basic" && validAuthMethods.includes(authMethod)) {
+  if (provided) {
+    client = createProviderClient(provided)
+    try {
+      await client.login()
+      await client.statelessClone.login()
+    } catch {
+      await Promise.allSettled([client.logout(), client.statelessClone.logout()])
+      throw new Error(`Unable to connect to provider connection ${connId}`)
+    }
+  } else if (authMethod !== "basic" && validAuthMethods.includes(authMethod)) {
     log.debug(`[connect] Using createAuthenticatedClient for ${connId} (${authMethod})`)
     client = await createAuthenticatedClient(connection)
     await client.login()
@@ -66,11 +83,19 @@ async function create(connId: string) {
     await manager.savePassword(name, username, password)
   }
 
+  if (
+    revisions.get(connId) !== revision ||
+    (provided && providedConnections.get(connId) !== provided)
+  ) {
+    await Promise.allSettled([client.logout(), client.statelessClone.logout()])
+    throw new Error(`Connection removed or changed during login: ${connId}`)
+  }
   // @ts-ignore
   const service = new AFsService(client)
   const newRoot = new Root(connId, service)
   roots.set(connId, newRoot)
   clients.set(connId, client)
+  connected.fire(connId)
 }
 
 // Track connections that failed with non-retryable errors (e.g. SSO timeout, auth rejection)
@@ -109,7 +134,10 @@ function createIfMissing(connId: string) {
       throw err
     })
     creations.set(connId, creation)
-    creation.finally(() => creations.delete(connId))
+    void creation.then(
+      () => creations.delete(connId),
+      () => creations.delete(connId)
+    )
   }
   return creation
 }
@@ -120,6 +148,8 @@ export function clearConnectionFailure(connId: string) {
 }
 
 export async function getOrCreateClient(connId: string, clone = true) {
+  connId = connId.toLowerCase()
+  await removals.get(connId)
   if (!clients.has(connId)) {
     try {
       await createIfMissing(connId)
@@ -132,7 +162,7 @@ export async function getOrCreateClient(connId: string, clone = true) {
 }
 
 export function getClient(connId: string, clone = true) {
-  const client = clients.get(connId)
+  const client = clients.get(connId.toLowerCase())
   if (client) return clone ? client.statelessClone : client
 
   // If client doesn't exist, this means validation failed or connection was never established
@@ -143,7 +173,7 @@ export function getClient(connId: string, clone = true) {
 }
 
 export const getRoot = (connId: string) => {
-  const root = roots.get(connId)
+  const root = roots.get(connId.toLowerCase())
   if (root) return root
   throw missing(connId)
 }
@@ -154,6 +184,8 @@ export const uriRoot = (uri: Uri) => {
 }
 
 export const getOrCreateRoot = async (connId: string) => {
+  connId = connId.toLowerCase()
+  await removals.get(connId)
   if (!roots.has(connId)) await createIfMissing(connId)
   return getRoot(connId)
 }
@@ -161,17 +193,46 @@ export const getOrCreateRoot = async (connId: string) => {
 export function hasLocks() {
   for (const root of roots.values()) if (root.lockManager.lockedPaths().next().value) return true
 }
+/** Immediately invalidate caches; await login cancellation, locks and logout in the background. */
+export function disconnectConnection(id: string): Promise<void> {
+  const connId = id.toLowerCase()
+  const previous = removals.get(connId)
+  if (previous) return previous
+  revisions.set(connId, (revisions.get(connId) || 0) + 1)
+  const client = clients.get(connId)
+  const root = roots.get(connId)
+  clients.delete(connId)
+  roots.delete(connId)
+  failedConnections.delete(connId)
+  const removal = (async () => {
+    await creations.get(connId)?.catch(() => undefined)
+    await Promise.allSettled(LogOutPendingDebuggers(connId))
+    if (root) await root.lockManager.dropall()?.catch(() => undefined)
+    if (client) await Promise.allSettled([client.logout(), client.statelessClone.logout()])
+  })()
+  removals.set(connId, removal)
+  if (client) disconnected.fire(connId)
+  void removal.then(
+    () => {
+      removals.delete(connId)
+      revisions.delete(connId)
+      failedConnections.delete(connId)
+    },
+    () => {
+      removals.delete(connId)
+      revisions.delete(connId)
+      failedConnections.delete(connId)
+    }
+  )
+  return removal
+}
+
 export async function disconnect() {
-  const connected = [...clients.values()]
-  const main = connected.map(c => c.logout())
-  const clones = connected
-    .map(c => c.statelessClone)
-    .filter(c => c.loggedin)
-    .map(c => c.logout())
-  await Promise.all([...main, ...clones, ...LogOutPendingDebuggers()])
-  // Clear all failure states so reconnect is possible
+  await Promise.all(
+    [...new Set([...clients.keys(), ...creations.keys()]).values()].map(disconnectConnection)
+  )
+  await Promise.all(LogOutPendingDebuggers())
   failedConnections.clear()
-  return
 }
 
 export const rootIsConnected = (connId: string) =>

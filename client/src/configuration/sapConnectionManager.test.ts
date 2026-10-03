@@ -971,3 +971,53 @@ describe("message handling: createCloudConnection (service key)", () => {
     expect(errMsg.message).toMatch(/Failed to create cloud connection/)
   })
 })
+
+import { registerProvider } from "../connectionProviders"
+
+describe("provider connections in Connection Manager", () => {
+  it("refreshes read-only entries without exposing provider authentication", async () => {
+    ;(vscode.workspace.getConfiguration as Mock).mockReturnValue(makeWorkspaceConfig())
+    const { manager, panel } = createManager()
+    let refresh!: () => void
+    let snapshot = [
+      {
+        id: "osd",
+        name: "Local ABAP",
+        url: "http://127.0.0.1:5000",
+        client: "001",
+        language: "EN",
+        user: "developer",
+        auth: { kind: "basic" as const, password: "secret" }
+      }
+    ]
+    const registration = registerProvider(
+      {
+        getConnections: () => snapshot,
+        onDidChange: listener => {
+          refresh = listener
+          return { dispose() {} }
+        }
+      },
+      () => [],
+      () => {}
+    )
+    const message = postMessageMock.mock.calls.at(-1)?.[0]
+    expect(message.data.provided).toEqual([
+      {
+        id: "osd",
+        name: "Local ABAP",
+        url: "http://127.0.0.1:5000",
+        client: "001",
+        language: "EN",
+        user: "developer"
+      }
+    ])
+    expect(JSON.stringify(message)).not.toContain("secret")
+    expect(panel.webview.html).toContain("Managed by an extension")
+    snapshot = []
+    refresh()
+    expect(postMessageMock.mock.calls.at(-1)?.[0].data.provided).toEqual([])
+    registration.dispose()
+    manager.dispose()
+  })
+})

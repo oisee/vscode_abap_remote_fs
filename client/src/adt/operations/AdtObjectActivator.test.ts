@@ -18,7 +18,8 @@ vi.mock("vscode", () => ({
 }))
 
 vi.mock("../conections", () => ({
-  getClient: vi.fn()
+  getClient: vi.fn(),
+  getRoot: vi.fn()
 }))
 
 vi.mock("../includes", () => ({
@@ -118,5 +119,71 @@ describe("AdtObjectActivator", () => {
   it("constructor uses stateless client", () => {
     AdtObjectActivator.get("conn4")
     expect(mockGetClient).toHaveBeenCalledWith("conn4", false)
+  })
+})
+
+import { activatedObject } from "../../apiEvents"
+import { getRoot } from "../conections"
+import type { AbapObject } from "abapobject"
+import { Uri } from "vscode"
+
+describe("activation API events", () => {
+  afterEach(() => vi.restoreAllMocks())
+  it("emits successful activation metadata and omits failed attempts", async () => {
+    const client = {
+      activate: vi.fn(async () => ({ success: true })),
+      inactiveObjects: vi.fn(async () => [])
+    }
+    const object = {
+      name: "ZCL_TEST",
+      type: "CLAS/OC",
+      path: "/sap/bc/adt/oo/classes/zcl_test",
+      structure: {},
+      loadStructure: vi.fn(async () => undefined),
+      childComponents: vi.fn(async () => ({ nodes: [] })),
+      lockObject: undefined as unknown
+    }
+    object.lockObject = object
+    const activator = new AdtObjectActivator(client as never)
+    const uri = Uri.parse("adt://osd/package/ZCL_TEST.abap")
+    const fire = vi.spyOn(activatedObject, "fire")
+    expect(await activator.activate(object as unknown as AbapObject, uri, false)).toEqual({
+      ok: true
+    })
+    expect(fire).toHaveBeenCalledExactlyOnceWith({
+      connId: "conn",
+      uri,
+      objectType: "CLAS/OC",
+      objectName: "ZCL_TEST"
+    })
+    client.activate.mockResolvedValue({ success: false })
+    expect((await activator.activate(object as unknown as AbapObject, uri, false)).ok).toBe(false)
+    expect(fire).toHaveBeenCalledOnce()
+  })
+  it("emits a filesystem event for each successfully activated batch object", async () => {
+    const selection = [
+      {
+        "adtcore:name": "ZTEST",
+        "adtcore:type": "PROG/P",
+        "adtcore:uri": "/sap/bc/adt/programs/programs/ztest"
+      }
+    ]
+    const client = {
+      activate: vi.fn(async () => ({ success: true })),
+      inactiveObjects: vi.fn(async () => selection.map(object => ({ object })))
+    }
+    vi.mocked(getRoot).mockReturnValue({
+      findByAdtUri: vi.fn(async () => ({ path: "/package/ZTEST.abap" }))
+    } as never)
+    vi.spyOn(activatedObject, "observed", "get").mockReturnValue(true)
+    const fire = vi.spyOn(activatedObject, "fire")
+    const activator = new AdtObjectActivator(client as never, "osd")
+    expect((await activator.activateMultiple(false)).ok).toBe(true)
+    expect(fire).toHaveBeenCalledWith(
+      expect.objectContaining({ connId: "osd", objectType: "PROG/P", objectName: "ZTEST" })
+    )
+    client.activate.mockResolvedValue({ success: false })
+    await activator.activateMultiple(false)
+    expect(fire).toHaveBeenCalledOnce()
   })
 })

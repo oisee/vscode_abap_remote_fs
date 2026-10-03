@@ -50,3 +50,12 @@ Passwords are stored securely in the OS credential manager (never in settings fi
 ## User vs. Workspace Settings
 
 Connections saved to **User Settings** are global — they appear in every VS Code workspace on your machine. Connections saved to **Workspace Settings** are stored in the `.vscode/settings.json` of the current project folder, making them easy to commit or share per project.
+
+## Connections contributed by extensions
+
+Other extensions can contribute temporary connections through ABAP FS API v2. These
+appear as read-only entries in Connection Manager and in **Connect to an ABAP system**.
+Their settings and credentials are managed by the contributing extension. When that
+extension withdraws a connection, ABAP FS disconnects it and removes its workspace
+folder. Consumer extension developers can find the integration contract and an OSD
+local-system example in the repository's [API.md](../../API.md).

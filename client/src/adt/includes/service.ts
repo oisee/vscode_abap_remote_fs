@@ -13,6 +13,10 @@ export interface IncludeData {
 const only = (c: MainInclude[]) => (c.length === 1 && c[0]) || undefined
 
 export class IncludeService {
+  public static forget(connId: string) {
+    this.services.delete(connId)
+  }
+
   public static get(connId: string) {
     return this.services.get(connId)
   }

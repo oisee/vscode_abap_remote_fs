@@ -355,3 +355,51 @@ describe("FsProvider", () => {
     })
   })
 })
+
+import { savedObject } from "../apiEvents"
+import { selectTransportIfNeeded } from "../adt/AdtTransports"
+
+describe("remote save API events", () => {
+  afterEach(() => vi.restoreAllMocks())
+  it("emits after successful writes, with no event for cancellation or failure", async () => {
+    resetFsProvider()
+    vi.mocked(LocalFsProvider.useLocalStorage).mockReturnValue(false)
+    vi.mocked(__$mock_abapfs.isAbapFile).mockReturnValue(true)
+    const object = { type: "PROG/P", name: "ZTEST", lockObject: undefined as unknown }
+    object.lockObject = object
+    const write = vi.fn(async () => undefined)
+    const node = { object, write }
+    const root = {
+      getNodeAsync: vi.fn(async () => node),
+      lockManager: {
+        finalStatus: vi.fn(async () => ({ status: "locked" })),
+        requestLock: vi.fn(async () => undefined),
+        lockStatus: vi.fn(() => ({ status: "locked", LOCK_HANDLE: "lock" })),
+        requestUnlock: vi.fn(async () => undefined)
+      }
+    }
+    vi.mocked(__$mock_adt_conections.getOrCreateRoot).mockResolvedValue(root as never)
+    vi.mocked(selectTransportIfNeeded).mockResolvedValue({
+      cancelled: false,
+      transport: ""
+    } as never)
+    const fire = vi.spyOn(savedObject, "fire")
+    const provider = FsProvider.get({ subscriptions: { push: vi.fn() } } as never)
+    const uri = makeUri("/ZTEST.abap", "adt", "osd")
+    await provider.writeFile(uri, Buffer.from("REPORT ztest."))
+    expect(write).toHaveBeenCalledOnce()
+    expect(fire).toHaveBeenCalledExactlyOnceWith({
+      connId: "osd",
+      uri,
+      objectType: "PROG/P",
+      objectName: "ZTEST"
+    })
+    vi.mocked(selectTransportIfNeeded).mockResolvedValueOnce({ cancelled: true } as never)
+    await provider.writeFile(uri, Buffer.from("REPORT ztest."))
+    write.mockRejectedValueOnce(new Error("write failed"))
+    await expect(provider.writeFile(uri, Buffer.from("REPORT ztest."))).rejects.toThrow(
+      "write failed"
+    )
+    expect(fire).toHaveBeenCalledOnce()
+  })
+})

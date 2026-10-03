@@ -241,3 +241,14 @@ test("chain structures", async () => {
   expect(result.x.key).toBe("key")
   expect(result.y.foo).toBe("x:key")
 })
+
+import { cache } from "./functions"
+it("deletes a cached connection entry using its normalized key", () => {
+  const create = vi.fn((id: string) => ({ id }))
+  const entries = cache(create, (id: string) => id.toLowerCase())
+  const first = entries.get("OSD")
+  expect(entries.get("osd")).toBe(first)
+  expect(entries.delete("osd")).toBe(true)
+  expect(entries.get("OSD")).not.toBe(first)
+  expect(create).toHaveBeenCalledTimes(2)
+})

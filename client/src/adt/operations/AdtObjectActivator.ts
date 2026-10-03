@@ -1,3 +1,4 @@
+import { activatedObject, objectEvent } from "../../apiEvents"
 import {
   ADTClient,
   isAdtError,
@@ -7,7 +8,7 @@ import {
 } from "abap-adt-api"
 import { Uri, EventEmitter, QuickPickItemKind } from "vscode"
 import { type AbapObject } from "abapobject"
-import { getClient } from "../conections"
+import { getClient, getRoot } from "../conections"
 import { IncludeProvider, IncludeService } from "../includes"
 import { isDefined, channel } from "../../lib"
 import { funWindow as window } from "../../services/funMessenger"
@@ -29,21 +30,59 @@ export interface ActivationEvent {
 }
 
 export class AdtObjectActivator {
-  constructor(private client: ADTClient) {}
+  constructor(
+    private client: ADTClient,
+    private readonly connId?: string
+  ) {}
   private static instances = new Map<string, AdtObjectActivator>()
   private emitter = new EventEmitter<ActivationEvent>()
+  public static forget(connId: string) {
+    this.instances.get(connId)?.emitter.dispose()
+    this.instances.delete(connId)
+  }
+
   public static get(connId: string) {
     const instance = this.instances.get(connId)
     if (instance) return instance
     const stateless_client = getClient(connId, false)
     // stateful_client.stateful = session_types.stateful
-    const newinstance = new AdtObjectActivator(stateless_client)
+    const newinstance = new AdtObjectActivator(stateless_client, connId)
     this.instances.set(connId, newinstance)
     return newinstance
   }
 
   public get onActivate() {
     return this.emitter.event
+  }
+
+  private async publishSelection(objects: InactiveObjectElement[], current?: AbapObject) {
+    if (!this.connId || !activatedObject.observed) return
+    for (const object of objects) {
+      if (
+        current &&
+        object["adtcore:name"] === current.lockObject.name &&
+        object["adtcore:type"] === current.lockObject.type
+      )
+        continue
+      try {
+        const mapped = await getRoot(this.connId).findByAdtUri(object["adtcore:uri"], true)
+        if (mapped)
+          activatedObject.fire({
+            connId: this.connId,
+            uri: Uri.parse(`adt://${this.connId}${mapped.path}`),
+            objectType: object["adtcore:type"],
+            objectName: object["adtcore:name"]
+          })
+      } catch {
+        /* An unmappable object must not turn a successful activation into failure. */
+      }
+    }
+  }
+
+  private async activateSelection(objects: InactiveObjectElement[], current: AbapObject) {
+    const result = await this.client.activate(objects)
+    if (result.success) await this.publishSelection(objects, current)
+    return result
   }
 
   private async getMain(object: AbapObject, uri: Uri) {
@@ -443,6 +482,7 @@ export class AdtObjectActivator {
 
       const result = await this.client.activate(selectedObjects)
       if (result?.success) {
+        await this.publishSelection(selectedObjects)
         return {
           ok: true,
           availableCount: inactiveObjects.length,
@@ -499,7 +539,7 @@ export class AdtObjectActivator {
 
       if (selectedObjects && selectedObjects.length > 0) {
         // Activate all selected objects (including main object)
-        result = await this.client.activate(selectedObjects)
+        result = await this.activateSelection(selectedObjects, object)
       } else {
         // User cancelled - don't activate anything, return a cancelled result
         return {
@@ -535,11 +575,11 @@ export class AdtObjectActivator {
             : fallbackObjects
 
           if (selectedObjects && selectedObjects.length > 0) {
-            result = await this.client.activate(selectedObjects)
+            result = await this.activateSelection(selectedObjects, object)
           }
         } else if (fallbackObjects.length === 1) {
           // Only one object (probably just the main object), activate it directly
-          result = await this.client.activate(fallbackObjects)
+          result = await this.activateSelection(fallbackObjects, object)
         }
       }
     }
@@ -566,6 +606,7 @@ export class AdtObjectActivator {
 
       if (result && result.success) {
         //log(`✅ ACTIVATE SUCCESS: firing event and loading structure`)
+        activatedObject.fire(objectEvent(uri, object))
         this.emitter.fire({ object, uri, activated: inactive, mainProg })
         await inactive.loadStructure(true)
         return { ok: true }

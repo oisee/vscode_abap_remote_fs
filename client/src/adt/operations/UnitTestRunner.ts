@@ -283,6 +283,11 @@ export class UnitTestRunner {
   getUrlType(id: string): TestResType {
     return this.urlTypes.get(id) || TestResType.object
   }
+  static forget(connId: string) {
+    this.instances.get(connId)?.controller.dispose()
+    this.instances.delete(connId)
+  }
+
   static get(connId: string) {
     const old = this.instances.get(connId)
     if (old) return old

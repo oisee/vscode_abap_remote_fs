@@ -1,3 +1,4 @@
+import { providedConnections, onProvidersChanged } from "../connectionProviders"
 /**
  * SAP Connection Manager
  * Modern webview-based connection management UI
@@ -297,6 +298,11 @@ export class SapConnectionManager {
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
     this.panel = panel
     this.extensionUri = extensionUri
+    this.disposables.push(
+      onProvidersChanged(() => {
+        void this.sendConnectionsToWebview()
+      })
+    )
 
     // Set the webview's initial html content
     this.update()
@@ -417,6 +423,14 @@ export class SapConnectionManager {
       type: "connections",
       data: {
         user: userRemotes,
+        provided: [...providedConnections.values()].map(c => ({
+          id: c.id,
+          name: c.name,
+          url: c.url,
+          client: c.client,
+          language: c.language,
+          user: c.user
+        })),
         workspace: workspaceRemotes
       }
     })
@@ -2166,6 +2180,16 @@ export class SapConnectionManager {
             function renderConnections() {
                 const list = document.getElementById('connectionsList');
                 const conns = connections[currentTarget];
+                let providedList = document.getElementById('providedConnections');
+                if (!providedList) {
+                    providedList = document.createElement('div');
+                    providedList.id = 'providedConnections';
+                    list.parentNode.appendChild(providedList);
+                }
+                providedList.innerHTML = (connections.provided || []).map(conn =>
+                    '<p><strong>' + escapeHtml(conn.name) + '</strong> (' + escapeHtml(conn.id) + ') — ' +
+                    escapeHtml(conn.url) + ' — Managed by an extension; use Connect to an ABAP system.</p>'
+                ).join('');
 
                 if (Object.keys(conns).length === 0) {
                     list.innerHTML = \`
