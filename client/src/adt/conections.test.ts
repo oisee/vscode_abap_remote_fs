@@ -273,6 +273,13 @@ describe("connection lifecycle", () => {
     expect(client.login).toHaveBeenCalledOnce()
     expect(client.statelessClone.login).toHaveBeenCalledOnce()
   })
+  it("invalidates the transport after a failed provider login", async () => {
+    providedConnections.set("osd", provided)
+    client.statelessClone.login.mockRejectedValueOnce(new Error("failed"))
+    await expect(getOrCreateRoot("osd")).rejects.toThrow(/Unable to connect/)
+    const signal = vi.mocked(createProviderClient).mock.calls.at(-1)?.[1]
+    expect(signal?.aborted).toBe(true)
+  })
   it("uses transient authentication and cleans up failed logins", async () => {
     providedConnections.set("osd", provided)
     client.statelessClone.login.mockRejectedValueOnce(new Error("password=secret"))

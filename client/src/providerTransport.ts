@@ -37,7 +37,10 @@ export class ProviderTransport {
 
 /** Reject promptly even when an external provider ignores cancellation. */
 export function untilCancelled<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new Error("Provider connection withdrawn"))
+  if (signal.aborted) {
+    void work.catch(() => undefined)
+    return Promise.reject(new Error("Provider connection withdrawn"))
+  }
   return new Promise((resolve, reject) => {
     const cancel = () => reject(new Error("Provider connection withdrawn"))
     signal.addEventListener("abort", cancel, { once: true })

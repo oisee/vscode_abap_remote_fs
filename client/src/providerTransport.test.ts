@@ -40,3 +40,14 @@ it("aborts an in-flight HTTP login on withdrawal", async () => {
     await new Promise<void>(resolve => server.close(() => resolve()))
   }
 })
+
+import { untilCancelled } from "./providerTransport"
+
+it("observes rejection of work passed to an already cancelled wait", async () => {
+  const cancellation = new AbortController()
+  cancellation.abort()
+  await expect(
+    untilCancelled(Promise.reject(new Error("late failure")), cancellation.signal)
+  ).rejects.toThrow(/withdrawn/)
+  await new Promise(resolve => setImmediate(resolve))
+})

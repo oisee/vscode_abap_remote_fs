@@ -122,6 +122,7 @@ function createIfMissing(connId: string) {
         ? untilCancelled(create(connId, cancellation), cancellation.signal)
         : create(connId, cancellation)
     ).catch(err => {
+      cancellation.abort()
       // Mark as permanently failed if it's an interactive/auth error
       // so VS Code filesystem doesn't keep triggering retry loops
       const msg = String(err?.message || err)
@@ -254,7 +255,9 @@ export function disconnectConnection(id: string): Promise<void> {
 
 export async function disconnect() {
   await Promise.all(
-    [...new Set([...clients.keys(), ...creations.keys()]).values()].map(disconnectConnection)
+    [...new Set([...clients.keys(), ...creations.keys(), ...cancellations.keys()]).values()].map(
+      disconnectConnection
+    )
   )
   await Promise.all(LogOutPendingDebuggers())
   failedConnections.clear()
