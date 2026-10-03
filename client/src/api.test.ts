@@ -298,6 +298,60 @@ describe("AbapFsApi v2", () => {
     expect(workspace.workspaceFolders?.map(f => f.uri.authority)).toEqual(["osd", "osd-two"])
     expect(folderListeners.size).toBe(0)
   })
+  it("rejects an unacknowledged edit after ten seconds and continues unrelated queued mounts", async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(workspace.updateWorkspaceFolders).mockImplementationOnce(() => true)
+      const stalled = api.connect("stalled")
+      const failure = vi.fn()
+      void stalled.catch(failure)
+      const next = api.connect("next")
+      await vi.advanceTimersByTimeAsync(9999)
+      expect(workspace.updateWorkspaceFolders).toHaveBeenCalledOnce()
+      expect(folderListeners.size).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(failure).toHaveBeenCalledOnce()
+      expect(failure.mock.calls[0][0].message).toMatch(/timed out/)
+      await next
+      expect(workspace.workspaceFolders?.map(f => f.uri.authority)).toEqual(["next"])
+      expect(folderListeners.size).toBe(0)
+      await api.connect("stalled")
+      expect(workspace.workspaceFolders?.map(f => f.uri.authority)).toEqual(["next", "stalled"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it("reconciles actual folders when an accepted edit emits no event", async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(workspace.updateWorkspaceFolders).mockImplementationOnce((_, __, ...folders) => {
+        Object.defineProperty(workspace, "workspaceFolders", { value: folders, configurable: true })
+        return true
+      })
+      const settled = vi.fn()
+      const mounting = api.connect("silent").then(settled)
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(settled).toHaveBeenCalledOnce()
+      await mounting
+      expect(api.isConnected("silent")).toBe(true)
+      expect(folderListeners.size).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it("cancels a withdrawn mount without acknowledgement and releases its listener and queue", async () => {
+    const registration = api.registerConnectionProvider({ getConnections: () => [connection] })
+    vi.mocked(workspace.updateWorkspaceFolders).mockImplementationOnce(() => true)
+    const mounting = api.connect("osd")
+    const rejected = expect(mounting).rejects.toThrow(/removed|changed/)
+    await vi.waitFor(() => expect(folderListeners.size).toBe(1))
+    const other = api.connect("other")
+    registration.dispose()
+    await rejected
+    await other
+    expect(workspace.workspaceFolders?.map(f => f.uri.authority)).toEqual(["other"])
+    expect(folderListeners.size).toBe(0)
+  })
   it("awaits mounting before connect returns and unmounts immediate withdrawal", async () => {
     const registration = api.registerConnectionProvider({ getConnections: () => [connection] })
     await api.connect("osd")

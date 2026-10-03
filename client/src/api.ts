@@ -84,18 +84,43 @@ function queueWorkspaceChange(change: () => Promise<void>): Promise<void> {
   return pending
 }
 function updateFolders(
+  signal: AbortSignal | undefined,
   start: number,
   count: number,
   ...folders: { uri: Uri; name: string }[]
 ): Promise<void> {
+  const expected = [...(workspace.workspaceFolders || [])]
+  expected.splice(start, count, ...folders.map((folder, index) => ({ ...folder, index })))
+  const matches = () => {
+    const actual = workspace.workspaceFolders || []
+    return (
+      actual.length === expected.length &&
+      actual.every((folder, index) => folder.uri.toString() === expected[index].uri.toString())
+    )
+  }
   return new Promise((resolve, reject) => {
+    const finish = (error?: Error) => {
+      clearTimeout(timer)
+      subscription.dispose()
+      signal?.removeEventListener("abort", cancel)
+      if (error) reject(error)
+      else resolve()
+    }
+    const cancel = () => finish(new Error("Connection removed or changed during workspace update"))
     const subscription = workspace.onDidChangeWorkspaceFolders(() => {
-      subscription.dispose()
-      resolve()
+      if (matches()) finish()
     })
-    if (!workspace.updateWorkspaceFolders(start, count, ...folders)) {
-      subscription.dispose()
-      reject(new Error("Unable to mount ABAP workspace folders"))
+    const timer = setTimeout(() => {
+      // Some accepted edits finish without an event; trust the actual folder state.
+      finish(matches() ? undefined : new Error("ABAP workspace folder update timed out"))
+    }, 10000)
+    signal?.addEventListener("abort", cancel, { once: true })
+    if (signal?.aborted) return cancel()
+    try {
+      if (!workspace.updateWorkspaceFolders(start, count, ...folders))
+        finish(new Error("Unable to mount ABAP workspace folders"))
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error("Unable to mount ABAP workspace folders"))
     }
   })
 }
@@ -115,16 +140,20 @@ function scheduleUnmount(id: string) {
             clientIsConnected(f.uri.authority))
       )
       unmounts.clear()
-      if (remaining.length !== folders.length) await updateFolders(0, folders.length, ...remaining)
+      if (remaining.length !== folders.length)
+        await updateFolders(undefined, 0, folders.length, ...remaining)
     }).catch(() => undefined)
   })
 }
 
+const mountCancellations = new Map<string, AbortController>()
 const mounts = new Map<string, Promise<void>>()
 async function connect(id: string): Promise<void> {
   id = id.toLowerCase()
   const pending = mounts.get(id)
   if (pending) return pending
+  const cancellation = new AbortController()
+  mountCancellations.set(id, cancellation)
   const owner = providedConnections.get(id)
   const current = () => clientIsConnected(id) && (!owner || providedConnections.get(id) === owner)
   const mount = (async () => {
@@ -133,7 +162,7 @@ async function connect(id: string): Promise<void> {
       if (!current()) throw new Error(`Connection removed or changed: ${id}`)
       if (workspace.workspaceFolders?.some(f => f.uri.scheme === "adt" && f.uri.authority === id))
         return
-      await updateFolders(workspace.workspaceFolders?.length || 0, 0, {
+      await updateFolders(cancellation.signal, workspace.workspaceFolders?.length || 0, 0, {
         uri: Uri.parse(`adt://${id}`),
         name: `${id}(ABAP)`
       })
@@ -141,7 +170,7 @@ async function connect(id: string): Promise<void> {
         const folders = workspace.workspaceFolders || []
         const remaining = folders.filter(f => f.uri.scheme !== "adt" || f.uri.authority !== id)
         if (remaining.length !== folders.length)
-          await updateFolders(0, folders.length, ...remaining)
+          await updateFolders(undefined, 0, folders.length, ...remaining)
         throw new Error(`Connection removed or changed: ${id}`)
       }
     })
@@ -151,6 +180,7 @@ async function connect(id: string): Promise<void> {
     await mount
   } finally {
     mounts.delete(id)
+    mountCancellations.delete(id)
   }
 }
 
@@ -167,6 +197,7 @@ export const api: AbapFsApi = {
       provider,
       () => Object.keys(workspace.getConfiguration("abapfs").remote || {}),
       id => {
+        mountCancellations.get(id)?.abort()
         IncludeService.forget(id)
         AdtObjectActivator.forget(id)
         UnitTestRunner.forget(id)
