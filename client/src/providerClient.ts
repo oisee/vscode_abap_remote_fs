@@ -1,7 +1,17 @@
 import { ADTClient, createSSLConfig, session_types, isCsrfError } from "abap-adt-api"
-import { AxiosHttpClient } from "abap-adt-api/build/AxiosHttpClient.js"
 import { ProviderTransport, untilCancelled } from "./providerTransport"
+import type { HttpClientOptions, HttpClientResponse } from "abap-adt-api/build/AdtHTTP.js"
 import type { ProvidedConnection } from "./connectionProviders"
+
+const requests = new WeakMap<
+  ADTClient,
+  (options: HttpClientOptions) => Promise<HttpClientResponse>
+>()
+export function providerHttpRequest(client: ADTClient, options: HttpClientOptions) {
+  const request = requests.get(client)
+  if (!request) throw new Error("Provider transport is unavailable")
+  return request(options)
+}
 
 function isUnauthorized(error: unknown): boolean {
   if (!error || typeof error !== "object") return false
@@ -19,7 +29,7 @@ export function createProviderClient(
     : {}
   const transport = new ProviderTransport(connection.url, ssl)
   const http = {
-    request: async (options: Parameters<AxiosHttpClient["request"]>[0]) => {
+    request: async (options: HttpClientOptions, redactResponse = false) => {
       const send = async () => {
         signal.throwIfAborted()
         const headers =
@@ -33,11 +43,17 @@ export function createProviderClient(
           delete mergedHeaders[cookieKey]
           mergedHeaders.Cookie = `${options.headers.Cookie}; ${headers[cookieKey]}`
         }
-        return untilCancelled(
+        const response = await untilCancelled(
           transport.request(
             {
               ...options,
-              ...(connection.auth.kind === "provider" ? { auth: undefined } : {}),
+              auth:
+                connection.auth.kind === "provider"
+                  ? undefined
+                  : (options.auth ?? {
+                      username: connection.user,
+                      password: connection.auth.password
+                    }),
               timeout: options.timeout ?? 30000,
               headers: mergedHeaders
             },
@@ -45,6 +61,28 @@ export function createProviderClient(
           ),
           signal
         )
+        if (!redactResponse) return response
+        // A server parser may report values from a malformed 200 response. Strip only provider
+        // secrets before they cross the protocol; headers are never stored in configuration.
+        const secrets = Object.values(headers).filter(Boolean)
+        const redact = (value: string) =>
+          secrets.reduce((text, secret) => text.split(secret).join("[redacted]"), value)
+        return {
+          ...response,
+          request: undefined,
+          body: redact(response.body),
+          statusText: redact(response.statusText),
+          headers: Object.fromEntries(
+            Object.entries(response.headers).map(([key, value]) => [
+              key,
+              typeof value === "string"
+                ? redact(value)
+                : Array.isArray(value)
+                  ? value.map(redact)
+                  : value
+            ])
+          )
+        }
       }
       try {
         for (let attempt = 0; attempt < 2; attempt++) {
@@ -115,6 +153,7 @@ export function createProviderClient(
         }
       }
     })
+    requests.set(proxy, options => http.request(options, true))
     return proxy
   }
   function safeError(error: unknown) {

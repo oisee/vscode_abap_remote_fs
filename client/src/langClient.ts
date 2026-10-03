@@ -1,3 +1,4 @@
+import { providerTransportConfig, languageProviderRequest } from "./providerLanguageTransport"
 import {
   type MainProgram,
   type CommLogEntryData,
@@ -134,7 +135,8 @@ export async function configFromKey(connId: string) {
   const connection = await RemoteManager.get().byIdAsync(connId)
   if (!connection) return undefined
   const { sapGui, ...cfg } = connection
-  return cfg
+  const providerTransport = providerTransportConfig(connId)
+  return providerTransport ? { ...cfg, password: "", providerTransport } : cfg
 }
 async function getToken(connId: string) {
   return futureToken(formatKey(connId))
@@ -329,6 +331,7 @@ export async function startLanguageClient(context: ExtensionContext) {
   client.onDidChangeState(e => {
     if (e.newState === State.Running) {
       client.onRequest(Methods.readConfiguration, configFromKey)
+      client.onRequest(Methods.providerRequest, languageProviderRequest)
       client.onRequest(Methods.objectDetails, objectDetailFromUrl)
       client.onRequest(Methods.readEditorObjectSource, readEditorObjectSource)
       client.onRequest(Methods.readObjectSourceOrMain, readObjectSource)

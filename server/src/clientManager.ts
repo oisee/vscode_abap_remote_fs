@@ -1,3 +1,4 @@
+import { createLanguageProviderClient } from "./providerClient"
 import { ADTClient, createSSLConfig, type LogData, session_types } from "abap-adt-api"
 import { createConnection, ProposedFeatures } from "vscode-languageserver"
 import { types } from "util"
@@ -14,6 +15,7 @@ import {
 } from "vscode-abap-remote-fs-sharedapi"
 import { isString } from "./functions"
 const clients: Map<string, ADTClient> = new Map()
+const providerSessions = new Map<string, string>()
 
 type ServerSslConfig = ReturnType<typeof createSSLConfig> & {
   debugCallback?: (logData: LogData) => void
@@ -152,6 +154,15 @@ function buildCertificateAgent(
 
 const refreshClient = async (key: string, conf: ClientConfiguration) => {
   const oldClient = clients.get(key)
+  if (conf.providerTransport) {
+    const client = createLanguageProviderClient(key, conf, (method, request) =>
+      connection.sendRequest(method, request)
+    )
+    client.stateful = session_types.stateful
+    clients.set(key, client)
+    providerSessions.set(key, conf.providerTransport.session)
+    return
+  }
   const sslconf = createServerSslConfig(conf, key)
 
   const authMethod = getAuthMethod(conf)
@@ -224,12 +235,23 @@ const refreshClient = async (key: string, conf: ClientConfiguration) => {
 export async function clientFromKey(key: string) {
   key = decodeURIComponent(key)
   let client = clients.get(key)
+  let configuration: ClientConfiguration | undefined
+  if (providerSessions.has(key)) {
+    configuration = await readConfiguration(key)
+    if (configuration?.providerTransport?.session !== providerSessions.get(key)) {
+      clients.delete(key)
+      providerSessions.delete(key)
+      client = undefined
+      if (!configuration) return undefined
+    }
+  }
   if (!client) {
-    const conf = await readConfiguration(key)
+    const conf = configuration ?? (await readConfiguration(key))
     if (conf) {
       await refreshClient(key, conf)
       // as clients are stateful, they will expire, usually in 10 minutes. So we need to refresh them every 4 minutes
-      setInterval(() => refreshClient(key, conf), 240000)
+      if (!conf.providerTransport) setInterval(() => refreshClient(key, conf), 240000)
+      if (conf.providerTransport) client = clients.get(key)
     }
   }
   return client

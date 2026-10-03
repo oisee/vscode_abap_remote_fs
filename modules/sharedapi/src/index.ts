@@ -1,4 +1,5 @@
 import { type LogData } from "abap-adt-api"
+import type { HttpClientOptions, HttpClientResponse } from "abap-adt-api/build/AdtHTTP.js"
 export enum Methods {
   objectDetails = "vscabap.objDetails",
   readConfiguration = "vscabap.readConfig",
@@ -9,6 +10,7 @@ export enum Methods {
   vsUri = "vscabap.vsUri",
   updateMainProgram = "vscabap.updateMain",
   getToken = "vscabap.getToken",
+  providerRequest = "vscabap.providerRequest",
   getAuthHeaders = "vscabap.getAuthHeaders",
   triggerSyntaxCheck = "vscabap.triggerSyntaxCheck",
   commLogEntry = "vscabap.commLogEntry",
@@ -65,7 +67,19 @@ export interface AuthHeadersResponse {
   certAuth?: CertAuthTransport
 }
 
+/** Provider credentials remain in the extension host. Session IDs invalidate stale server clients. */
+export interface ProviderRequest {
+  id: string
+  session: string
+  options: HttpClientOptions
+}
+export type ProviderResponse =
+  | { response: HttpClientResponse }
+  | { failure: { status?: number; csrf: boolean; withdrawn?: boolean } }
+
 export interface ClientConfiguration {
+  providerTransport?: { session: string }
+
   name: string
   url: string
   username: string

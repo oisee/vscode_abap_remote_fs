@@ -114,6 +114,13 @@ Nothing is persisted; re-register when the consumer activates again. The example
 uses your own `startLocalSystem()` launcher: retain its per-start token only in
 memory, withdraw the snapshot on shutdown, and publish a new snapshot on restart.
 
+Language-server features also support provider authentication. Each server HTTP attempt is
+forwarded to the extension host, which fetches fresh headers and retries a 401 once.
+Provider authentication headers and passwords stay in the host and are never saved in server
+configuration. Echoed provider header values are redacted before responses reach server
+parsers. Withdrawal cancels pending requests; stale server sessions reject further requests,
+and a replacement snapshot creates a new server session.
+
 `connect` authenticates and mounts the system, reuses existing sessions, and rejects
 on failure. It does not show a connection picker. Configured connections retain their
 existing authentication prompts. `isConnected` reflects a live cached ADT session;
