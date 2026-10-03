@@ -31,19 +31,23 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   )
 
-  // After OSD starts its local server, use its actual port and credentials.
+  // Your local system launcher returns a new in-memory token on every start.
+  const { port, token } = await startLocalSystem()
   connections = [{
     id: "osd-local",
     name: "OSD local ABAP",
-    url: "http://127.0.0.1:5000",
+    url: `http://127.0.0.1:${port}`,
     client: "001",
     language: "EN",
     user: "DEVELOPER",
-    auth: { kind: "basic", password: "" }
+    autoConnect: true,
+    auth: {
+      kind: "provider",
+      getHeaders: async () => ({ "X-OSD-Token": token })
+    }
   }]
   changed.fire()
-  await api.connect("osd-local")
-  await api.openObject("osd-local", "PROG/P", "ZHELLO")
+  // ABAP FS connects and mounts automatically; onDidConnect reports login success.
 
   // On server shutdown: withdraw the connection and release its ADT sessions.
   // connections = []
@@ -77,27 +81,36 @@ A provider implements synchronous `getConnections(): readonly ProvidedConnection
 and optional `onDidChange: vscode.Event<void>`. Load asynchronous state in the
 consumer, then fire the event. Registration reads the initial snapshot immediately.
 Each connection has `id`, display `name`, `url`, `client`, `language`, `user`, `auth`
-and optional `allowSelfSigned`. IDs accept letters, digits, `_` and `-`, are normalized
-to lowercase, and must not collide with settings or another provider. Invalid
-snapshots throw and leave the previous snapshot intact. URLs must use HTTP(S), with
+and optional `allowSelfSigned` and `autoConnect`. IDs accept letters, digits, `_`
+and `-`, are normalized to lowercase, and must not collide with settings or another
+provider. Invalid snapshots throw and leave the previous snapshot intact. URLs must use HTTP(S), with
 no embedded credentials, query or fragment.
 
 Authentication is either `{ kind: "basic", password: string }` (an empty password
 is supported for local systems), or
 `{ kind: "provider", getHeaders(): Promise<Record<string, string>> }`.
 Header callbacks run before every request in both ADT sessions, supporting rotating
-Authorization headers or cookies; ABAP FS handles CSRF and session cookies. Provider
-credentials never go to settings or the password vault, and provider HTTP errors
-are redacted. Communication logging is disabled for provider HTTP traffic.
+Authorization headers or cookies; ABAP FS handles CSRF and session cookies. On HTTP
+401, ABAP FS fetches fresh headers and retries that request once. A second failure
+rejects with a redacted error; other failures are not retried by this auth layer.
+No password prompt is shown for provider authentication. Header values are never
+written to logs, errors, settings or telemetry. Provider credentials never go to
+settings or the password vault, and provider HTTP errors are redacted. Communication logging is disabled for provider HTTP traffic.
 
 Provided connections appear in the connection picker and as read-only entries in
 Connection Manager. Changed or withdrawn connections are disconnected and unmounted;
 unchanged snapshots preserve sessions. Disposing registration withdraws all its
 connections and unsubscribes from changes. Cache invalidation is immediate; lock,
-debugger and session cleanup completes asynchronously. To connect after a port or
-credential change, fire `onDidChange` and call `connect(id)` again; it waits for cleanup.
+debugger and session cleanup completes asynchronously. With `autoConnect: true`,
+ABAP FS connects and mounts connections present in the initial snapshot and after
+`onDidChange`, including after a port or credential change. Presence means the system is active; withdraw it when the server stops.
+Automatic failures are silent; another provider event retries, or call `connect(id)`
+to observe a rejected promise. Connections without this flag still require
+`connect(id)`. Reconnecting waits for cleanup.
 Disposal cancels a pending login. Consumers should stop requests before withdrawal.
-Nothing is persisted; re-register when the consumer activates again.
+Nothing is persisted; re-register when the consumer activates again. The example
+uses your own `startLocalSystem()` launcher: retain its per-start token only in
+memory, withdraw the snapshot on shutdown, and publish a new snapshot on restart.
 
 `connect` authenticates and mounts the system, reuses existing sessions, and rejects
 on failure. It does not show a connection picker. Configured connections retain their
