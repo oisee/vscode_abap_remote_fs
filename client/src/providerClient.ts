@@ -1,4 +1,4 @@
-import { ADTClient, createSSLConfig, session_types } from "abap-adt-api"
+import { ADTClient, createSSLConfig, session_types, isCsrfError } from "abap-adt-api"
 import { AxiosHttpClient } from "abap-adt-api/build/AxiosHttpClient.js"
 import type { ProvidedConnection } from "./connectionProviders"
 
@@ -45,13 +45,13 @@ export function createProviderClient(connection: ProvidedConnection): ADTClient 
           if (attempt === 0 && response.status === 401 && connection.auth.kind === "provider")
             continue
           // Do not let ADT's response parser expose a body that echoes an authentication header.
-          if (response.status >= 400) throw new Error("ADT request failed")
+          if (response.status >= 400) throw safeError(response)
           return response
         }
         throw new Error("ADT authentication failed")
-      } catch {
+      } catch (error) {
         // HTTP errors can contain request headers and passwords. Never expose them to logs.
-        throw new Error(`ADT request failed for provider connection ${connection.id}`)
+        throw safeError(error)
       }
     }
   }
@@ -91,20 +91,43 @@ export function createProviderClient(connection: ProvidedConnection): ADTClient 
           try {
             const result = value.apply(target, args)
             return result instanceof Promise
-              ? result.catch(() => {
-                  throw safeError()
+              ? result.catch((error: unknown) => {
+                  throw safeError(error)
                 })
               : result
-          } catch {
-            throw safeError()
+          } catch (error) {
+            throw safeError(error)
           }
         }
       }
     })
     return proxy
   }
-  function safeError() {
-    return new Error(`ADT request failed for provider connection ${connection.id}`)
+  function safeError(error: unknown) {
+    const failure = error as {
+      status?: number
+      err?: number
+      response?: { status?: number; headers?: Record<string, unknown> }
+    }
+    const response = failure?.response ?? (failure as typeof failure.response)
+    const status = failure?.status ?? response?.status ?? failure?.err
+    const csrf =
+      isCsrfError(error) || (status === 403 && response?.headers?.["x-csrf-token"] === "Required")
+    return Object.assign(new Error(`ADT request failed for provider connection ${connection.id}`), {
+      typeID: Symbol.for(csrf ? "BAD CSRF" : "ADT EXCEPTION"),
+      status: typeof status === "number" ? status : undefined,
+      err: typeof status === "number" ? status : 0,
+      properties: {},
+      response:
+        typeof status === "number"
+          ? {
+              status,
+              statusText: "ADT request failed",
+              body: "",
+              headers: csrf ? { "x-csrf-token": "Required" } : {}
+            }
+          : undefined
+    })
   }
   return protect(new ProviderClient())
 }

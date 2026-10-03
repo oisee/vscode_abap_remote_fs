@@ -22,7 +22,7 @@ vi.mock("abap-adt-api/build/AxiosHttpClient.js", () => ({
     request = request
   }
 }))
-import { session_types } from "abap-adt-api"
+import { session_types, isCsrfError } from "abap-adt-api"
 import { createProviderClient } from "./providerClient"
 
 const connection: ProvidedConnection = {
@@ -148,6 +148,45 @@ describe("provider ADT transport", () => {
       expect(value).not.toContain(token)
     for (const logger of [...logs, extensionLog, extensionLog.debug, telemetry, communicationLog])
       expect(logger).not.toHaveBeenCalled()
+  })
+  it("preserves session expiry classification and recovers a stateless session", async () => {
+    const client = createProviderClient({
+      ...connection,
+      auth: { kind: "provider", getHeaders: async () => ({ Authorization: "PRIVATE-CSRF-TOKEN" }) }
+    })
+    await client.login()
+    request.mockClear()
+    const expired = {
+      status: 403,
+      statusText: "PRIVATE-CSRF-TOKEN",
+      body: "PRIVATE-CSRF-TOKEN",
+      headers: { "x-csrf-token": "Required", Authorization: "PRIVATE-CSRF-TOKEN" }
+    }
+    await client.statelessClone.login()
+    request.mockClear()
+    request.mockResolvedValueOnce(expired)
+    request.mockResolvedValueOnce({
+      status: 200,
+      statusText: "OK",
+      body: "",
+      headers: { "x-csrf-token": "renewed" }
+    })
+    request.mockResolvedValueOnce({ status: 200, statusText: "OK", body: "source", headers: {} })
+    expect(
+      await client.statelessClone.getObjectSource("/sap/bc/adt/programs/programs/ztest/source/main")
+    ).toBe("source")
+    expect(request).toHaveBeenCalledTimes(3)
+    client.stateful = session_types.stateful
+    request.mockResolvedValueOnce(expired)
+    const failure = await client
+      .getObjectSource("/sap/bc/adt/programs/programs/ztest/source/main")
+      .catch(error => error)
+    expect(isCsrfError(failure)).toBe(true)
+    expect(failure.status).toBe(403)
+    expect(failure.response.headers).toEqual({ "x-csrf-token": "Required" })
+    expect(failure.parent).toBeUndefined()
+    expect(JSON.stringify(failure)).not.toContain("PRIVATE-CSRF-TOKEN")
+    expect(failure.stack).not.toContain("PRIVATE-CSRF-TOKEN")
   })
   it("does not retry non-401 failures or basic authentication", async () => {
     const getHeaders = vi.fn(async () => ({ Authorization: "secret" }))
