@@ -1,3 +1,4 @@
+import { providerProtocolHandler, providerProtocolMiddleware } from "./providerRedaction"
 import { providerTransportConfig, languageProviderRequest } from "./providerLanguageTransport"
 import {
   type MainProgram,
@@ -321,6 +322,7 @@ export async function startLanguageClient(context: ExtensionContext) {
         { language: "abap", scheme: ADTSCHEME },
         { language: "abap_cds", scheme: ADTSCHEME }
       ],
+      middleware: providerProtocolMiddleware,
       outputChannel: channel,
       revealOutputChannelOn: RevealOutputChannelOn.Warn
     }
@@ -330,15 +332,18 @@ export async function startLanguageClient(context: ExtensionContext) {
 
   client.onDidChangeState(e => {
     if (e.newState === State.Running) {
-      client.onRequest(Methods.readConfiguration, configFromKey)
-      client.onRequest(Methods.providerRequest, languageProviderRequest)
-      client.onRequest(Methods.objectDetails, objectDetailFromUrl)
-      client.onRequest(Methods.readEditorObjectSource, readEditorObjectSource)
-      client.onRequest(Methods.readObjectSourceOrMain, readObjectSource)
-      client.onRequest(Methods.vsUri, getVSCodeUri)
-      client.onRequest(Methods.setSearchProgress, setSearchProgress)
-      client.onRequest(Methods.getToken, getToken)
-      client.onRequest(Methods.getAuthHeaders, getAuthHeaders)
+      client.onRequest(Methods.readConfiguration, providerProtocolHandler(configFromKey))
+      client.onRequest(Methods.providerRequest, providerProtocolHandler(languageProviderRequest))
+      client.onRequest(Methods.objectDetails, providerProtocolHandler(objectDetailFromUrl))
+      client.onRequest(
+        Methods.readEditorObjectSource,
+        providerProtocolHandler(readEditorObjectSource)
+      )
+      client.onRequest(Methods.readObjectSourceOrMain, providerProtocolHandler(readObjectSource))
+      client.onRequest(Methods.vsUri, providerProtocolHandler(getVSCodeUri))
+      client.onRequest(Methods.setSearchProgress, providerProtocolHandler(setSearchProgress))
+      client.onRequest(Methods.getToken, providerProtocolHandler(getToken))
+      client.onRequest(Methods.getAuthHeaders, providerProtocolHandler(getAuthHeaders))
       client.onNotification(Methods.commLogEntry, (entry: CommLogEntryData) =>
         CallLogger.get(entry.connId)?.add(hidrateLogData(entry.logData))
       )

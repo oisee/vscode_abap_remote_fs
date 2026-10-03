@@ -1,3 +1,8 @@
+import {
+  rememberProviderHeaders,
+  rememberProviderPassword,
+  redactProviderProtocol
+} from "./providerRedaction"
 import { ADTClient, createSSLConfig, session_types, isCsrfError } from "abap-adt-api"
 import { ProviderTransport, untilCancelled } from "./providerTransport"
 import type { HttpClientOptions, HttpClientResponse } from "abap-adt-api/build/AdtHTTP.js"
@@ -28,6 +33,7 @@ export function createProviderClient(
     ? createSSLConfig(!!connection.allowSelfSigned)
     : {}
   const transport = new ProviderTransport(connection.url, ssl)
+  if (connection.auth.kind === "basic") rememberProviderPassword(connection.auth.password)
   const http = {
     request: async (options: HttpClientOptions, redactResponse = false) => {
       const send = async () => {
@@ -37,6 +43,7 @@ export function createProviderClient(
             ? await untilCancelled(connection.auth.getHeaders(), signal)
             : {}
         signal.throwIfAborted()
+        rememberProviderHeaders(headers)
         const mergedHeaders = { ...options.headers, ...headers }
         const cookieKey = Object.keys(headers).find(key => key.toLowerCase() === "cookie")
         if (cookieKey && options.headers?.Cookie) {
@@ -62,27 +69,9 @@ export function createProviderClient(
           signal
         )
         if (!redactResponse) return response
-        // A server parser may report values from a malformed 200 response. Strip only provider
-        // secrets before they cross the protocol; headers are never stored in configuration.
-        const secrets = Object.values(headers).filter(Boolean)
-        const redact = (value: string) =>
-          secrets.reduce((text, secret) => text.split(secret).join("[redacted]"), value)
-        return {
-          ...response,
-          request: undefined,
-          body: redact(response.body),
-          statusText: redact(response.statusText),
-          headers: Object.fromEntries(
-            Object.entries(response.headers).map(([key, value]) => [
-              key,
-              typeof value === "string"
-                ? redact(value)
-                : Array.isArray(value)
-                  ? value.map(redact)
-                  : value
-            ])
-          )
-        }
+        // Sanitize the entire serialized result, including header keys and extra adapter fields.
+        const sanitized = redactProviderProtocol({ ...response, request: undefined })
+        return sanitized as HttpClientResponse
       }
       try {
         for (let attempt = 0; attempt < 2; attempt++) {

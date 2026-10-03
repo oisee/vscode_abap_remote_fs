@@ -10,14 +10,25 @@ vi.mock("./providerTransport", async importOriginal => ({
   }
 }))
 vi.mock("./adt/conections", () => ({ getOrCreateClient: vi.fn() }))
-vi.mock("../../server/node_modules/vscode-languageserver/lib/main.js", () => ({
+vi.mock("../../server/node_modules/vscode-languageserver/lib/main.js", async importOriginal => ({
+  ...(await importOriginal<
+    typeof import("../../server/node_modules/vscode-languageserver/lib/main.js")
+  >()),
   createConnection: () => ({ sendRequest }),
   ProposedFeatures: { all: {} }
 }))
 import { getOrCreateClient } from "./adt/conections"
 import { providedConnections, type ProvidedConnection } from "./connectionProviders"
+import { providerProtocolHandler, providerProtocolMiddleware } from "./providerRedaction"
 import { createProviderClient } from "./providerClient"
 import { providerTransportConfig, languageProviderRequest } from "./providerLanguageTransport"
+import { PassThrough } from "node:stream"
+import {
+  createMessageConnection,
+  StreamMessageReader,
+  StreamMessageWriter,
+  Trace
+} from "../../server/node_modules/vscode-languageserver-protocol/node.js"
 import { clientFromKey } from "../../server/src/clientManager"
 
 const connection: ProvidedConnection = {
@@ -123,6 +134,124 @@ describe("language server provider integration", () => {
     ])
       expect(value).not.toContain("PRIVATE-TOKEN")
   })
+  it.each(["provider", "basicHeader", "basic"] as const)(
+    "keeps credential components out of serialized responses and verbose RPC traces (%s)",
+    async kind => {
+      const secrets = [
+        "PRIVATE_BEARER_TOKEN",
+        "PRIVATE_COOKIE_VALUE",
+        "PRIVATE_HEADER_VALUE",
+        "PRIVATE_BASIC_TOKEN",
+        'PRIVATE_PASSWORD_"quoted'
+      ]
+      const owner: ProvidedConnection = {
+        ...connection,
+        auth:
+          kind === "basic"
+            ? { kind, password: secrets[4] }
+            : {
+                kind: "provider",
+                getHeaders: async () => ({
+                  Authorization:
+                    kind === "basicHeader" ? `Basic ${secrets[3]}` : `Bearer ${secrets[0]}`,
+                  Cookie: `gateway=${secrets[1]}; short=abc`,
+                  "X-Private": secrets[2],
+                  "X-Short": "short",
+                  "X-Empty": ""
+                })
+              }
+      }
+      providedConnections.set("osd", owner)
+      const host = createProviderClient(owner)
+      vi.mocked(getOrCreateClient).mockResolvedValue(host)
+      const upstream = new PassThrough(),
+        downstream = new PassThrough()
+      const wire: string[] = [],
+        traces: string[] = []
+      for (const stream of [upstream, downstream])
+        stream.on("data", data => wire.push(data.toString()))
+      const sender = createMessageConnection(
+        new StreamMessageReader(downstream),
+        new StreamMessageWriter(upstream)
+      )
+      const receiver = createMessageConnection(
+        new StreamMessageReader(upstream),
+        new StreamMessageWriter(downstream)
+      )
+      const tracer = { log: (message: string, data?: string) => traces.push(message, data ?? "") }
+      sender.trace(Trace.Verbose, tracer)
+      receiver.trace(Trace.Verbose, tracer)
+      receiver.onRequest(Methods.providerRequest, providerProtocolHandler(languageProviderRequest))
+      sender.listen()
+      receiver.listen()
+      try {
+        const exposed =
+          kind === "basic"
+            ? [secrets[4]]
+            : [kind === "basicHeader" ? secrets[3] : secrets[0], ...secrets.slice(1, 3)]
+        request.mockResolvedValueOnce({
+          ...ok(exposed.join(" ") + " short abc"),
+          statusText: exposed.join(" "),
+          headers: { Echo: exposed.join(" ") }
+        })
+        const payload = {
+          id: "osd",
+          session: providerTransportConfig("osd")!.session,
+          options: { url: "/sap/bc/adt/test" }
+        }
+        const result = await sender.sendRequest(Methods.providerRequest, payload)
+        expect(JSON.stringify(result)).toContain("[redacted]")
+        expect(JSON.stringify(result)).toContain("short abc")
+        expect(traces.join(" ")).toContain("[redacted]")
+        for (const secret of exposed)
+          for (const output of [JSON.stringify(result), wire.join(""), traces.join(" ")]) {
+            expect(output).not.toContain(secret)
+            expect(output).not.toContain(JSON.stringify(secret).slice(1, -1))
+          }
+        receiver.onRequest(
+          "echo",
+          providerProtocolHandler((params: unknown) => params)
+        )
+        // Model an editor/source payload returning to the server after an echoed response.
+        const echo = await providerProtocolMiddleware.sendRequest!(
+          "echo",
+          { source: exposed.join(" ") },
+          undefined,
+          (_type, params) => sender.sendRequest("echo", params)
+        )
+        expect(JSON.stringify(echo)).toContain("[redacted]")
+        const notified = new Promise<unknown>(resolve =>
+          receiver.onNotification("echoNotify", resolve)
+        )
+        await providerProtocolMiddleware.sendNotification!(
+          "echoNotify",
+          (_type, params) => sender.sendNotification("echoNotify", params),
+          { source: exposed.join(" ") }
+        )
+        expect(JSON.stringify(await notified)).toContain("[redacted]")
+        receiver.onRequest(
+          "handlerError",
+          providerProtocolHandler(() => {
+            throw new Error(exposed.join(" "))
+          })
+        )
+        await expect(sender.sendRequest("handlerError")).rejects.toThrow(/redacted/)
+        request.mockRejectedValueOnce(new Error(exposed.join(" ")))
+        const failure = await sender.sendRequest(Methods.providerRequest, payload)
+        expect(failure).toHaveProperty("failure")
+        for (const secret of exposed)
+          for (const output of [wire.join(""), traces.join(" ")]) {
+            expect(output).not.toContain(secret)
+            expect(output).not.toContain(JSON.stringify(secret).slice(1, -1))
+          }
+      } finally {
+        sender.dispose()
+        receiver.dispose()
+        upstream.destroy()
+        downstream.destroy()
+      }
+    }
+  )
   it("invalidates cached server clients on withdrawal and supports a new snapshot", async () => {
     const { server, cancellation } = await setup()
     await server.login()
