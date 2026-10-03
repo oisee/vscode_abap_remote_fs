@@ -1,3 +1,4 @@
+import { connected, disconnected } from "../../apiEvents"
 import { type AtcWorkList } from "abap-adt-api"
 import { type Task } from "fp-ts/lib/Task"
 import {
@@ -235,6 +236,15 @@ class AtcProvider implements TreeDataProvider<AtcNode> {
   exemptFilter: boolean = true
   constructor() {
     this.setExemptFilter(true)
+    disconnected.event(id => {
+      this.activationListeners.get(id)?.dispose()
+      this.activationListeners.delete(id)
+    })
+    connected.event(id => {
+      if (!this.autoRefresh) return
+      const system = this.root.children.find(s => s.connectionId === id)
+      if (system) this.listenForActivation(system)
+    })
   }
 
   get onDidChangeTreeData() {
@@ -261,22 +271,26 @@ class AtcProvider implements TreeDataProvider<AtcNode> {
     setContext("abapfs:atc:autorefreshOn", enabled)
     if (enabled) {
       for (const s of this.root.children) {
-        if (this.activationListeners.has(s.connectionId)) continue
-        const listener = AdtObjectActivator.get(s.connectionId).onActivate(e => {
-          const parent = e.object instanceof AbapObjectBase ? e.object.parent : undefined
-          const h = s.children.find(
-            o =>
-              (o.object.name === e.object.name && o.object.objectTypeId === e.object.type) ||
-              (o.object.name === parent?.name && o.object.objectTypeId === parent?.type)
-          )
-          if (h) atcRefresh()
-        })
-        this.activationListeners.set(s.connectionId, listener)
+        this.listenForActivation(s)
       }
     } else {
       for (const [connectionId, listener] of this.activationListeners) listener.dispose()
       this.activationListeners.clear()
     }
+  }
+
+  private listenForActivation(s: AtcSystem) {
+    if (this.activationListeners.has(s.connectionId)) return
+    const listener = AdtObjectActivator.get(s.connectionId).onActivate(e => {
+      const parent = e.object instanceof AbapObjectBase ? e.object.parent : undefined
+      const h = s.children.find(
+        o =>
+          (o.object.name === e.object.name && o.object.objectTypeId === e.object.type) ||
+          (o.object.name === parent?.name && o.object.objectTypeId === parent?.type)
+      )
+      if (h) atcRefresh()
+    })
+    this.activationListeners.set(s.connectionId, listener)
   }
 
   public findings() {

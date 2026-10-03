@@ -22,9 +22,15 @@ vi.mock("vscode", () => {
     }),
     TreeItemCollapsibleState: { Expanded: 1, Collapsed: 2, None: 0 },
     EventEmitter: vi.fn().mockImplementation(function () {
+      const listeners = new Set<(value: unknown) => void>()
       return {
-        fire: vi.fn(),
-        event: vi.fn()
+        fire: vi.fn((value: unknown) => {
+          for (const listener of listeners) listener(value)
+        }),
+        event: vi.fn((listener: (value: unknown) => void) => {
+          listeners.add(listener)
+          return { dispose: () => listeners.delete(listener) }
+        })
       }
     }),
     commands: { executeCommand: vi.fn() }
@@ -386,4 +392,35 @@ describe("AtcObject", () => {
     const atcObj = new AtcObject(obj, parent)
     expect(atcObj.children).toEqual([])
   })
+})
+
+import { atcProvider } from "./view"
+import { connected, disconnected } from "../../apiEvents"
+import { AdtObjectActivator } from "../../adt/operations/AdtObjectActivator"
+import { atcRefresh } from "./commands"
+
+it("reattaches ATC auto-refresh when a configured connection reconnects", () => {
+  let notify!: (event: unknown) => void
+  const dispose = vi.fn()
+  const subscribe = vi.fn((listener: (event: unknown) => void) => {
+    notify = listener
+    return { dispose }
+  })
+  vi.mocked(AdtObjectActivator.get).mockReturnValue({ onActivate: subscribe } as never)
+  const provider = atcProvider
+  const system = {
+    connectionId: "configured",
+    children: [{ object: { name: "ZTEST", objectTypeId: "PROG/P" } }]
+  }
+  Object.defineProperty(provider.root, "children", { value: [system] })
+  provider.setAutoRefresh(true)
+  disconnected.fire("configured")
+  expect(dispose).toHaveBeenCalledOnce()
+  expect(provider.activationListeners.has("configured")).toBe(false)
+  connected.fire("configured")
+  expect(subscribe).toHaveBeenCalledTimes(2)
+  vi.mocked(atcRefresh).mockClear()
+  notify({ object: { name: "ZTEST", type: "PROG/P" } })
+  expect(atcRefresh).toHaveBeenCalledOnce()
+  provider.setAutoRefresh(false)
 })
