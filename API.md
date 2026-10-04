@@ -86,6 +86,9 @@ and `-`, are normalized to lowercase, and must not collide with settings or anot
 provider. Invalid snapshots throw and leave the previous snapshot intact. URLs must use HTTP(S), with
 no embedded credentials, query or fragment.
 
+Mounted provider workspace folders use the display `name`, falling back to
+`id(ABAP)` when no name is available. Configured user connections keep their existing labels.
+
 Authentication is either `{ kind: "basic", password: string }` (an empty password
 is supported for local systems), or
 `{ kind: "provider", getHeaders(): Promise<Record<string, string>> }`.

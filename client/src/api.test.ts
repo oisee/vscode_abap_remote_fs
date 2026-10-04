@@ -271,6 +271,21 @@ describe("AbapFsApi v2", () => {
     vi.mocked(clientIsConnected).mockReturnValue(false)
     expect(api.isConnected("osd")).toBe(false)
   })
+  it.each(["OSD (local)", ""])("mounts provider connections with display name %j", async name => {
+    providedConnections.set("osd", { ...connection, id: "osd", name })
+    await api.connect("OSD")
+    expect(workspace.updateWorkspaceFolders).toHaveBeenCalledExactlyOnceWith(0, 0, {
+      uri: Uri.parse("adt://osd"),
+      name: name || "osd(ABAP)"
+    })
+  })
+  it("keeps the id-based mount label for configured connections", async () => {
+    await api.connect("DEV100")
+    expect(workspace.updateWorkspaceFolders).toHaveBeenCalledExactlyOnceWith(0, 0, {
+      uri: Uri.parse("adt://dev100"),
+      name: "dev100(ABAP)"
+    })
+  })
   it("serializes different connections until asynchronous folder updates complete", async () => {
     let pending = false
     vi.mocked(workspace.updateWorkspaceFolders).mockImplementation(

@@ -202,6 +202,7 @@ import { currentUri, currentAbapFile, currentEditState, openObject, AdtCommands 
 import { funWindow as window } from "../services/funMessenger"
 import { ADTSCHEME, getRoot } from "../adt/conections"
 import { RemoteManager } from "../config"
+import { providedConnections } from "../connectionProviders"
 import { uriAbapFile } from "../adt/operations/AdtObjectFinder"
 import { isAbapFolder, isAbapFile } from "abapfs"
 
@@ -223,6 +224,7 @@ function makeAdtUri(authority = "dev100", path = "/sap/bc/adt/programs/programs/
 
 beforeEach(() => {
   vi.clearAllMocks()
+  providedConnections.clear()
   ;(mockWindow as any).activeTextEditor = undefined
 })
 
@@ -246,6 +248,35 @@ describe("currentUri", () => {
 })
 
 describe("connectAdtServer", () => {
+  test.each(["OSD (local)", "", undefined])(
+    "mounts with provider display name %j or the existing configured label",
+    async name => {
+      if (name !== undefined)
+        providedConnections.set("osd-local", {
+          id: "osd-local",
+          name,
+          url: "http://127.0.0.1:5000",
+          client: "001",
+          language: "EN",
+          user: "developer",
+          auth: { kind: "basic", password: "" }
+        })
+      vi.mocked(RemoteManager.get).mockReturnValue({
+        selectConnection: vi.fn().mockResolvedValue({
+          remote: { name: "OSD-local", username: "developer" },
+          userCancel: false
+        })
+      } as never)
+      vi.mocked(__$mock_adt_conections.getOrCreateRoot).mockResolvedValue({} as never)
+
+      await (AdtCommands as any).connectAdtServer({ connection: "OSD-local" })
+
+      expect(vscode.workspace.updateWorkspaceFolders).toHaveBeenCalledExactlyOnceWith(0, 0, {
+        uri: expect.objectContaining({ scheme: "adt", authority: "OSD-local" }),
+        name: name || "OSD-local(ABAP)"
+      })
+    }
+  )
   test("offers username and password actions for authentication failures", async () => {
     const { getOrCreateRoot } = __$mock_adt_conections
     const mockManager = {

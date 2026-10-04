@@ -164,7 +164,7 @@ async function connect(id: string): Promise<void> {
         return
       await updateFolders(cancellation.signal, workspace.workspaceFolders?.length || 0, 0, {
         uri: Uri.parse(`adt://${id}`),
-        name: `${id}(ABAP)`
+        name: owner?.name || `${id}(ABAP)`
       })
       if (!current()) {
         const folders = workspace.workspaceFolders || []

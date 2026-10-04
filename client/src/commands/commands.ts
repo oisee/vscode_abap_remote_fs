@@ -21,6 +21,7 @@ import {
 import * as vscode from "vscode"
 import { funWindow as window } from "../services/funMessenger"
 import { pickAdtRoot, RemoteManager } from "../config"
+import { providedConnections } from "../connectionProviders"
 import {
   caughtToString,
   inputBox,
@@ -266,7 +267,7 @@ export class AdtCommands {
       const folderCount = workspace.workspaceFolders?.length ?? 0
       workspace.updateWorkspaceFolders(folderCount, 0, {
         uri: Uri.parse("adt://" + remote.name),
-        name: remote.name + "(ABAP)"
+        name: providedConnections.get(remote.name.toLowerCase())?.name || remote.name + "(ABAP)"
       })
       extensionContext.subscriptions.push(UnitTestRunner.get(remote.name).controller)
       log(`Connected to server ${remote.name}`)
